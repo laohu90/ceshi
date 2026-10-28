@@ -1,0 +1,10 @@
+{
+    "name": "fox/wallet-balance-checker",
+    "description": "从助记词派生 MetaMask 钱包地址并查询 ETH 余额",
+    "require": {
+        "guzzlehttp/guzzle": "^7.0",
+        "simplito/elliptic-php": "^1.0",
+        "kornrunner/keccak": "^1.0",
+        "bip39/bip39": "^1.0"
+    }
+}
