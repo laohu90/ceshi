@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-ScreenScan RPA 智能工作流状态机 - 终极自适应智能增强版
+ScreenScan RPA 智能工作流状态机 (工业级健壮版)
 特性：
-1. 智能视窗自适应引擎 (自适应根据屏幕分辨率动态调整，窗口缩小时提供滚动与折叠，功能100%全显无遮挡)
-2. 多尺度图像金字塔与边缘轮廓匹配 (支持多图、抗缩放、抗主题变色)
-3. 四变体智能 OCR 引擎 (原图/CLAHE增强/Otsu二值化/反色二值化 + 模糊容错匹配)
-4. 智能防卡死看门狗守护 (45秒无响应自动自愈唤醒)
-5. 四重穿透物理点击与拟人化微操随机化 (SendInput + AttachThreadInput + PostMessage + ±2px扰动)
-6. 驱动级全局热键钩子 (F8 启动 / F9 停止，任何游戏与全屏应用均 100% 毫秒级响应)
-7. 多动作并发冲突智能仲裁系统 (依据 P1~P99 权重优先级决出唯一执行者，绝无光标冲突)
+1. 智能视窗自适应引擎 (根据分辨率自适应布局，支持动态滚动与折叠，零截断)
+2. 多图模板匹配与局部 ROI 缩放扫描 (支持多图候选独立流转，动态缓存与全屏/局部 ROI 扫描支持)
+3. 智能多变体文字 OCR (基于 Windows UWP 原生 WinOCR 引擎，四重预处理变体与精确字词边界计算)
+4. 状态机心跳监控看门狗 (监控执行线程心跳状态并在假死/阻塞时及时告警保护)
+5. 拟人化输入与前台激活 (SendInput 结合鼠标轻微扰动与窗体自卫防误点保护)
+6. 多热键监控 (F7 即时暂停/恢复、F8 启动、F9 停止)
+7. 多动作并发冲突仲裁系统 (依据 P1~P99 权重优先级决出唯一执行者，支持 Dry-Run 仿真演练与执行上限)
 """
 
 import sys
@@ -114,8 +114,9 @@ def activate_target_window(x, y):
         return None
 
 class ScreenSnipper:
-    def __init__(self, parent, callback):
+    def __init__(self, parent, callback, return_bbox=False):
         self.callback = callback
+        self.return_bbox = return_bbox
         self.top = tk.Toplevel(parent)
         self.top.attributes('-alpha', 0.3)
         self.top.attributes('-fullscreen', True)
@@ -153,6 +154,9 @@ class ScreenSnipper:
 
         if (x2 - x1) > 5 and (y2 - y1) > 5:
             bbox = (x1, y1, x2, y2)
+            if self.return_bbox:
+                self.callback(bbox)
+                return
             time.sleep(0.1)
             img = ImageGrab.grab(bbox=bbox)
             save_path = os.path.join(os.getcwd(), f"snip_{int(time.time())}.png")
@@ -440,7 +444,12 @@ class RuleDialog(tk.Toplevel):
         tk.Label(c1, text="独占锁定(秒):", bg="#0f172a", fg="#f59e0b", font=("Microsoft YaHei UI", 9, "bold")).pack(side=tk.LEFT)
         self.lock_entry = tk.Entry(c1, width=6, bg="#1e293b", fg="#f59e0b", insertbackground="white", font=("Microsoft YaHei UI", 9, "bold"))
         self.lock_entry.insert(0, str(self.rule.get("lock_exclusive", 0.0)))
-        self.lock_entry.pack(side=tk.LEFT, padx=(4, 6))
+        self.lock_entry.pack(side=tk.LEFT, padx=(4, 15))
+
+        tk.Label(c1, text="定时周期(秒):", bg="#0f172a", fg="#38bdf8", font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT)
+        self.timer_interval_entry = tk.Entry(c1, width=6, bg="#1e293b", fg="#38bdf8", insertbackground="white", font=("Microsoft YaHei UI", 9))
+        self.timer_interval_entry.insert(0, str(self.rule.get("timer_interval", 15.0)))
+        self.timer_interval_entry.pack(side=tk.LEFT, padx=(4, 6))
 
         self.on_type_change()
         self.on_action_change()
@@ -715,7 +724,7 @@ class RuleDialog(tk.Toplevel):
         if paths:
             for p in paths:
                 new_idx = len(self.candidates) + 1
-                new_prio = max(10, 100 - new_idx * 10)
+                new_prio = min(99, new_idx + 1)
                 self.candidates.append({
                     "id": f"cand_{int(time.time()*1000)}_{new_idx}",
                     "name": os.path.basename(p),
@@ -774,6 +783,10 @@ class RuleDialog(tk.Toplevel):
             timeout_val = float(self.timeout_entry.get())
         except ValueError:
             timeout_val = 20.0
+        try:
+            timer_int_val = float(self.timer_interval_entry.get())
+        except Exception:
+            timer_int_val = 15.0
 
         target_rule_id = self.target_id_map.get(self.jump_combo_var.get(), "")
         timeout_target_id = self.timeout_id_map.get(self.timeout_combo_var.get(), "")
@@ -795,6 +808,7 @@ class RuleDialog(tk.Toplevel):
             "next_target_id": target_rule_id,
             "timeout_target_id": timeout_target_id,
             "next_timeout": timeout_val,
+            "timer_interval": timer_int_val,
             "humanize": self.humanize_var.get(),
             "candidates": self.candidates
         })
@@ -851,6 +865,7 @@ class RealScreenScanBot:
         self.bot_start_time = 0        # 启动时间戳
         self.max_duration_seconds = 0  # 最长运行时长上限 (0=不限)
         self.timer_records = {}        # 定时器规则的时间戳记忆
+        self.rule_last_fire = {}       # 每条规则最后触发时间戳 (精确冷却管理)
 
         self.compact_mode = False
         self.create_widgets()
@@ -1052,7 +1067,11 @@ class RealScreenScanBot:
         tk.Button(row1, text="✏️ 修改步骤", command=self.edit_rule, bg="#3b82f6", fg="white", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 4))
         tk.Button(row1, text="🗑️ 删除步骤", command=self.delete_rule, bg="#ef4444", fg="white", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 8))
         tk.Button(row1, text="⬆️ 上移", command=self.move_up, bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=6, pady=2).pack(side=tk.LEFT, padx=(0, 3))
-        tk.Button(row1, text="⬇️ 下移", command=self.move_down, bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=6, pady=2).pack(side=tk.LEFT)
+        tk.Button(row1, text="⬇️ 下移", command=self.move_down, bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=6, pady=2).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Button(row1, text="🎯 框选监控区域(ROI)", command=self.start_roi_selection, bg="#0d9488", fg="white", font=("Microsoft YaHei UI", 8, "bold"), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(row1, text="🌐 重置全屏", command=self.reset_roi_fullscreen, bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=6, pady=2).pack(side=tk.LEFT, padx=(0, 6))
+        self.lbl_roi_status = tk.Label(row1, text="🌐 全屏监控", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8))
+        self.lbl_roi_status.pack(side=tk.LEFT)
 
         row2 = tk.Frame(btn_bar, bg="#0f172a")
         row2.pack(fill=tk.X, pady=1)
@@ -1086,7 +1105,12 @@ class RealScreenScanBot:
         tk.Label(ctrl_frame, text="执行上限:", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
         self.max_runs_entry = tk.Entry(ctrl_frame, width=4, bg="#1e293b", fg="#fff", insertbackground="white", font=("Microsoft YaHei UI", 8))
         self.max_runs_entry.insert(0, "0")
-        self.max_runs_entry.pack(side=tk.LEFT, padx=(2, 10))
+        self.max_runs_entry.pack(side=tk.LEFT, padx=(2, 6))
+
+        tk.Label(ctrl_frame, text="限时(分):", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
+        self.max_duration_entry = tk.Entry(ctrl_frame, width=4, bg="#1e293b", fg="#fff", insertbackground="white", font=("Microsoft YaHei UI", 8))
+        self.max_duration_entry.insert(0, "0")
+        self.max_duration_entry.pack(side=tk.LEFT, padx=(2, 10))
 
         self.btn_start = tk.Button(ctrl_frame, text="▶ 启动 (F8)", command=self.start_bot, bg="#10b981", fg="white", font=("Microsoft YaHei UI", 10, "bold"), padx=12, pady=4, relief=tk.FLAT)
         self.btn_start.pack(side=tk.LEFT, padx=(0, 4))
@@ -1195,10 +1219,21 @@ class RealScreenScanBot:
             cand = ret[4] if len(ret) == 5 else None
             
             if matched and coord:
-                ox = rule.get("offset_x", 0)
-                oy = rule.get("offset_y", 0)
-                tx, ty = coord[0] + ox, coord[1] + oy
-                self.log(f"🎯 命中目标坐标: ({coord[0]}, {coord[1]}) | 含偏移位置: ({tx}, {ty})")
+                rx = region[0] if region else 0
+                ry = region[1] if region else 0
+                ox = cand.get("offset_x", rule.get("offset_x", 0)) if cand else rule.get("offset_x", 0)
+                oy = cand.get("offset_y", rule.get("offset_y", 0)) if cand else rule.get("offset_y", 0)
+                tx, ty = coord[0] + rx + ox, coord[1] + ry + oy
+                self.log(f"🎯 命中目标坐标: ({coord[0]}, {coord[1]}) | 全屏坐标(含偏移): ({tx}, {ty})")
+
+                # Dry-Run 仿真与自身窗口自卫拦截
+                if self.is_self_window(tx, ty):
+                    self.log(f"🛑 【安全拦截】测试点击坐标 ({tx}, {ty}) 落在控制台窗口内，已拒绝点击！")
+                    return
+                if getattr(self, "dry_run", False):
+                    self.log(f"🛡️ 【DRY-RUN 试运行】已命中目标坐标 ({tx}, {ty})，仿真模式下已拦截物理点击！")
+                    return
+
                 self.hardware_click(tx, ty, button="left", hold_time=0.15, humanize=rule.get("humanize", True))
                 self.log("🎉 真实物理点击已执行！请查看目标软件是否已被点中。")
                 try:
@@ -1339,6 +1374,10 @@ class RealScreenScanBot:
     def toggle_pause(self):
         if not self.running:
             return
+        now = time.time()
+        if hasattr(self, "_last_pause_toggle") and now - self._last_pause_toggle < 0.4:
+            return
+        self._last_pause_toggle = now
         self.paused = not self.paused
         if self.paused:
             def _ui_pause():
@@ -1350,6 +1389,25 @@ class RealScreenScanBot:
                 self.btn_pause.config(text="⏸ 暂停 (F7)", bg="#f59e0b", fg="black")
             self.root.after(0, _ui_resume)
             self.log("▶️ 【状态机已恢复】继续监控。")
+
+    def start_roi_selection(self):
+        self.root.iconify()
+        time.sleep(0.3)
+        ScreenSnipper(self.root, self.on_roi_selected, return_bbox=True)
+
+    def on_roi_selected(self, bbox):
+        self.root.deiconify()
+        if bbox:
+            self.target_region = bbox
+            w = bbox[2] - bbox[0]
+            h = bbox[3] - bbox[1]
+            self.lbl_roi_status.config(text=f"🎯 ROI: ({bbox[0]},{bbox[1]})-({bbox[2]},{bbox[3]}) [{w}x{h}]", fg="#10b981")
+            self.log(f"🎯 已限定识别监控区域 (ROI): ({bbox[0]}, {bbox[1]}) 到 ({bbox[2]}, {bbox[3]}) [{w}x{h}]，大幅降低全屏扫描开销！")
+
+    def reset_roi_fullscreen(self):
+        self.target_region = None
+        self.lbl_roi_status.config(text="🌐 全屏监控", fg="#94a3b8")
+        self.log("🌐 已恢复为全屏扫描监控模式。")
 
     def run_preflight_health_check(self):
         self.log("🩺 正在进行规则健康体检 (路径完整性、悬空跳转、死循环)...")
@@ -1393,7 +1451,7 @@ class RealScreenScanBot:
             messagebox.showwarning("规则健康告警", f"发现以下潜在问题，建议排查：\n\n{msg}")
 
     def start_global_hotkey_listener(self):
-        self.root.bind_all("<F7>", lambda e: self.toggle_pause())
+        # 移除窗口焦点下的重复 F7 绑定，由底层全局钩子统一响应并防抖，避免暂停即刻恢复
         self.root.bind_all("<F8>", lambda e: self.safe_start_bot())
         self.root.bind_all("<F9>", lambda e: self.safe_stop_bot())
 
@@ -1448,9 +1506,16 @@ class RealScreenScanBot:
             self.log_box.see(tk.END)
             self.log_box.config(state=tk.DISABLED)
             
-            # 安全留证：同步持久化落盘至 screenscan_rpa.log
+            # 安全留证：同步持久化落盘至 screenscan_rpa.log (带 5MB 自动轮转)
             try:
-                with open("screenscan_rpa.log", "a", encoding="utf-8") as f:
+                log_p = "screenscan_rpa.log"
+                if os.path.exists(log_p) and os.path.getsize(log_p) > 5 * 1024 * 1024:
+                    backup_p = "screenscan_rpa.log.1"
+                    if os.path.exists(backup_p):
+                        try: os.remove(backup_p)
+                        except Exception: pass
+                    os.rename(log_p, backup_p)
+                with open(log_p, "a", encoding="utf-8") as f:
                     f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
             except Exception:
                 pass
@@ -1662,7 +1727,8 @@ class RealScreenScanBot:
                                         w1_h = getattr(w1, 'height', 0) if hasattr(w1, 'height') else (w1.get('height', 0) if w1 else 0)
                                         cx = (w0_x + w1_x + w1_w) // 2
                                         cy = (w0_y + w1_y + w1_h) // 2
-                                        cx, cy = int(cx / 2), int(cy / 2)
+                                        scale = 1.0 if idx == 0 else 2.0
+                                        cx, cy = int(cx / scale), int(cy / scale)
                                     else:
                                         cx, cy = 0, 0
                                     variant_name = ["原图", "CLAHE增强", "Otsu二值", "反色二值"][idx] if idx < 4 else "预处理"
@@ -1718,7 +1784,7 @@ class RealScreenScanBot:
                 t_np = np.asarray(t_bytes, dtype=np.uint8)
                 t_cv = cv2.imdecode(t_np, cv2.IMREAD_COLOR)
                 if t_cv is None:
-                    return False, "图片文件解码失败", None, 0.0, None
+                    return False, "图片文件解码失败", None, 0.0
 
                 t_gray = cv2.cvtColor(t_cv, cv2.COLOR_BGR2GRAY)
                 th_h, th_w = t_gray.shape
@@ -1795,6 +1861,12 @@ class RealScreenScanBot:
             self.max_actions = int(self.max_runs_entry.get())
         except Exception:
             self.max_actions = 0
+            
+        try:
+            dur_m = float(self.max_duration_entry.get())
+            self.max_duration_seconds = dur_m * 60.0 if dur_m > 0 else 0
+        except Exception:
+            self.max_duration_seconds = 0
 
         self.btn_start.config(state=tk.DISABLED)
         self.btn_pause.config(state=tk.NORMAL, text="⏸ 暂停 (F7)", bg="#f59e0b", fg="black")
@@ -1802,6 +1874,9 @@ class RealScreenScanBot:
         
         mode_str = "【🛡️ Dry-Run 仿真试运行模式 - 绝不真实点击】" if self.dry_run else "【⚡ 物理驱动模式】"
         cap_str = f" | 执行上限: {self.max_actions} 次" if self.max_actions > 0 else ""
+        if self.max_duration_seconds > 0:
+            cap_str += f" | 时长上限: {round(self.max_duration_seconds/60, 1)}分钟"
+        self.rule_last_fire = {}
         self.log(f"🚀 [状态机已启动] {mode_str}{cap_str} 正在监控工作流... 按 [F7] 暂停 / [F9] 停止。")
 
         threading.Thread(target=self.run_state_machine_loop, daemon=True).start()
@@ -1836,6 +1911,11 @@ class RealScreenScanBot:
             try:
                 now = time.time()
 
+                if self.max_duration_seconds > 0 and (now - self.bot_start_time) >= self.max_duration_seconds:
+                    self.log(f"⏰ 【已达运行时长上限】已运行 {round((now - self.bot_start_time)/60.0, 1)} 分钟，安全终止脚本！")
+                    self.stop_bot()
+                    break
+
                 if self.workflow_target_id:
                     if self.workflow_target_deadline > 0 and now > self.workflow_target_deadline:
                         target_r = id_to_rule.get(self.workflow_target_id)
@@ -1858,8 +1938,11 @@ class RealScreenScanBot:
                                 ox = cand.get("offset_x", fallback_r.get("offset_x", 0)) if cand else fallback_r.get("offset_x", 0)
                                 oy = cand.get("offset_y", fallback_r.get("offset_y", 0)) if cand else fallback_r.get("offset_y", 0)
                                 final_coord = (coord[0] + rx + ox, coord[1] + ry + oy) if coord else None
-                                self.execute_smart_action(final_coord, fallback_r, candidate=cand)
-                                self.last_action_timestamp = time.time()
+                                if matched or fallback_r.get("action") in ("sound_alarm",):
+                                    self.execute_smart_action(final_coord, fallback_r, candidate=cand)
+                                    self.last_action_timestamp = time.time()
+                                else:
+                                    self.log(f"⚠️ 【兜底未命中】超时兜底规则【{fallback_r['name']}】目标未在画面中出现，放弃触发以防误动作。")
                                 self.workflow_target_id = None
                                 self.workflow_target_deadline = 0
                             else:
@@ -1874,7 +1957,9 @@ class RealScreenScanBot:
                         if target_r and target_r.get("enabled", True):
                             remain_s = round(self.workflow_target_deadline - now, 1) if self.workflow_target_deadline > 0 else "无限"
                             active_rules = [target_r]
-                            self.log(f"🔀 【链式等待中】仅等待指定下一步【{target_r['name']}】(超时倒计时: {remain_s}s)")
+                            if now - getattr(self, "_last_chain_wait_log", 0) > 4.0:
+                                self.log(f"🔀 【链式等待中】仅等待指定下一步【{target_r['name']}】(超时倒计时: {remain_s}s)")
+                                self._last_chain_wait_log = now
                         else:
                             self.workflow_target_id = None
                             active_rules = [r for r in self.rules if r.get("enabled", True)]
@@ -1882,7 +1967,9 @@ class RealScreenScanBot:
                     if self.locked_rule_id and now < self.lock_expire_time:
                         remaining = round(self.lock_expire_time - now, 1)
                         active_rules = [r for r in self.rules if r["id"] == self.locked_rule_id and r.get("enabled", True)]
-                        self.log(f"🔒 【独占锁定中】当前仅执行独占步骤【{active_rules[0]['name']}】(剩余 {remaining} 秒)")
+                        if now - getattr(self, "_last_lock_log", 0) > 4.0:
+                            self.log(f"🔒 【独占锁定中】当前仅执行独占步骤【{active_rules[0]['name']}】(剩余 {remaining} 秒)")
+                            self._last_lock_log = now
                     else:
                         self.locked_rule_id = None
                         active_rules = [r for r in self.rules if r.get("enabled", True)]
@@ -1898,6 +1985,10 @@ class RealScreenScanBot:
                 for r in active_rules:
                     if not self.running:
                         break
+
+                    r_cd = float(r.get("cooldown", 0.0))
+                    if r_cd > 0 and (now - self.rule_last_fire.get(r["id"], 0.0)) < r_cd:
+                        continue
 
                     ret = self.detect_single_rule(r, screenshot, screen_gray)
                     is_match, info, coord, score = ret[:4]
@@ -1949,6 +2040,7 @@ class RealScreenScanBot:
                     final_coord = (coord[0] + rx + ox, coord[1] + ry + oy) if coord else None
 
                     self.log(f"🎯 触发步骤【{r['name']}】(P{winner['priority']})! {info} | 坐标: {final_coord}")
+                    self.rule_last_fire[r["id"]] = time.time()
                     self.execute_smart_action(final_coord, r, candidate=cand)
 
                     # 候选级「终止脚本」优先判断
@@ -2014,6 +2106,8 @@ class RealScreenScanBot:
                     cooldown = float(r.get("cooldown", 0.0))
                     if cooldown > 0:
                         time.sleep(cooldown)
+                    else:
+                        time.sleep(0.08)  # 即使无冷却也微休眠，防止0秒规则连点打死CPU
 
                 if not matched_any:
                     time.sleep(interval)
@@ -2151,6 +2245,19 @@ class RealScreenScanBot:
             self.log(f"❌ 动作执行异常: {e}")
 
 if __name__ == "__main__":
+    # 单实例运行互斥保护 (避免双开互抢鼠标和覆盖 JSON)
+    _mutex = None
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "ScreenScanRPA_SingleInstance_Mutex")
+            if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+                import tkinter.messagebox as mb
+                mb.showerror("重复运行", "⚠️ ScreenScan RPA 已有一个实例在运行中！\n请勿同时启动多个实例，以防按键和鼠标冲突。")
+                sys.exit(0)
+        except Exception:
+            pass
+
     root = tk.Tk()
     app = RealScreenScanBot(root)
     root.mainloop()

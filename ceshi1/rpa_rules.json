@@ -5,7 +5,7 @@
     "priority": 1,
     "enabled": true,
     "type": "image",
-    "target": "C:/Users/laohu/Desktop/ceshi/4d9520d8-8de4-44c0-b446-dd0b95fe9838.png;C:/Users/laohu/Desktop/ceshi/6a189871-aed5-4b17-abde-b721c8425999.png;C:/Users/laohu/Desktop/ceshi/27cd3e7f-18de-45eb-af9f-be0eabbb9188.png;C:/Users/laohu/Desktop/ceshi/bd275335-4962-4c99-8c37-2fa95c071225.png;C:/Users/laohu/Desktop/ceshi/cb7f580b-e6bd-465b-9966-c2f4653fb38c.png;C:/Users/laohu/Desktop/ceshi/cbcefa02-9df7-4ea0-8157-12907272a799.png;C:/Users/laohu/Desktop/ceshi/d50a3936-04a5-4669-b25e-60c70277ff96.png;C:/Users/laohu/Desktop/ceshi/321e2cac-e99b-4588-8426-a23503098d42.png;C:/Users/laohu/Desktop/ceshi/91778fd4-fea5-4259-8555-2c026f28342b.png;C:/Users/laohu/Desktop/ceshi/6009c74d-a367-4d0c-905f-33a529e50f2f.png;C:/Users/laohu/Desktop/ceshi/1eaac8ef-477b-48e2-adc6-a2c6dd8f9909.png;C:/Users/laohu/Desktop/ceshi/6fc43295-20ec-47df-bb8b-8dcc9f61a997.png;C:/Users/laohu/Desktop/ceshi/9662f5c0-0a43-4746-af9c-8a158b429e4d.png;C:/Users/laohu/Desktop/ceshi/0c44d86d-a39e-401a-b856-7844d70686e5.png;C:/Users/laohu/Desktop/ceshi/4e53b276-7eb5-4892-82e5-e22db9f828ca.png;C:/Users/laohu/Desktop/ceshi/a8f15efb-0087-4a83-832a-49fc372a5523.png;C:/Users/laohu/Desktop/ceshi/0b7510e2-454f-440c-8af8-2fb1a536b0a6.png;C:/Users/laohu/Desktop/ceshi/dc1a23e0-3129-4419-b24e-b26d1908f182.png",
+    "target": "4d9520d8-8de4-44c0-b446-dd0b95fe9838.png;6a189871-aed5-4b17-abde-b721c8425999.png;27cd3e7f-18de-45eb-af9f-be0eabbb9188.png;bd275335-4962-4c99-8c37-2fa95c071225.png;cb7f580b-e6bd-465b-9966-c2f4653fb38c.png;cbcefa02-9df7-4ea0-8157-12907272a799.png;d50a3936-04a5-4669-b25e-60c70277ff96.png;321e2cac-e99b-4588-8426-a23503098d42.png;91778fd4-fea5-4259-8555-2c026f28342b.png;6009c74d-a367-4d0c-905f-33a529e50f2f.png;1eaac8ef-477b-48e2-adc6-a2c6dd8f9909.png;6fc43295-20ec-47df-bb8b-8dcc9f61a997.png;9662f5c0-0a43-4746-af9c-8a158b429e4d.png;0c44d86d-a39e-401a-b856-7844d70686e5.png;4e53b276-7eb5-4892-82e5-e22db9f828ca.png;a8f15efb-0087-4a83-832a-49fc372a5523.png;0b7510e2-454f-440c-8af8-2fb1a536b0a6.png;dc1a23e0-3129-4419-b24e-b26d1908f182.png",
     "confidence": 0.7,
     "offset_x": 0,
     "offset_y": 0,
@@ -22,42 +22,42 @@
       {
         "id": "cand_1792842055560_1",
         "name": "4d9520d8-8de4-44c0-b446-dd0b95fe9838.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/4d9520d8-8de4-44c0-b446-dd0b95fe9838.png",
+        "image_path": "4d9520d8-8de4-44c0-b446-dd0b95fe9838.png",
         "priority": 2,
         "action": "click"
       },
       {
         "id": "cand_1792842055560_2",
         "name": "6a189871-aed5-4b17-abde-b721c8425999.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/6a189871-aed5-4b17-abde-b721c8425999.png",
+        "image_path": "6a189871-aed5-4b17-abde-b721c8425999.png",
         "priority": 2,
         "action": "click"
       },
       {
         "id": "cand_1792842055560_4",
         "name": "27cd3e7f-18de-45eb-af9f-be0eabbb9188.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/27cd3e7f-18de-45eb-af9f-be0eabbb9188.png",
+        "image_path": "27cd3e7f-18de-45eb-af9f-be0eabbb9188.png",
         "priority": 2,
         "action": "click"
       },
       {
         "id": "cand_1792842055560_7",
         "name": "bd275335-4962-4c99-8c37-2fa95c071225.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/bd275335-4962-4c99-8c37-2fa95c071225.png",
+        "image_path": "bd275335-4962-4c99-8c37-2fa95c071225.png",
         "priority": 2,
         "action": "click"
       },
       {
         "id": "cand_1792842055560_8",
         "name": "cb7f580b-e6bd-465b-9966-c2f4653fb38c.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/cb7f580b-e6bd-465b-9966-c2f4653fb38c.png",
+        "image_path": "cb7f580b-e6bd-465b-9966-c2f4653fb38c.png",
         "priority": 2,
         "action": "click"
       },
       {
         "id": "cand_1792842055560_9",
         "name": "cbcefa02-9df7-4ea0-8157-12907272a799.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/cbcefa02-9df7-4ea0-8157-12907272a799.png",
+        "image_path": "cbcefa02-9df7-4ea0-8157-12907272a799.png",
         "priority": 2,
         "action": "click",
         "next_mode": "stop",
@@ -66,7 +66,7 @@
       {
         "id": "cand_1792842055560_10",
         "name": "d50a3936-04a5-4669-b25e-60c70277ff96.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/d50a3936-04a5-4669-b25e-60c70277ff96.png",
+        "image_path": "d50a3936-04a5-4669-b25e-60c70277ff96.png",
         "priority": 2,
         "action": "click"
       },
@@ -80,28 +80,28 @@
       {
         "id": "cand_1792843798263_10",
         "name": "321e2cac-e99b-4588-8426-a23503098d42.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/321e2cac-e99b-4588-8426-a23503098d42.png",
+        "image_path": "321e2cac-e99b-4588-8426-a23503098d42.png",
         "priority": 2,
         "action": "click"
       },
       {
         "id": "cand_1792843932154_10",
         "name": "91778fd4-fea5-4259-8555-2c026f28342b.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/91778fd4-fea5-4259-8555-2c026f28342b.png",
+        "image_path": "91778fd4-fea5-4259-8555-2c026f28342b.png",
         "priority": 2,
         "action": "click"
       },
       {
         "id": "cand_1792844061107_11",
         "name": "6009c74d-a367-4d0c-905f-33a529e50f2f.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/6009c74d-a367-4d0c-905f-33a529e50f2f.png",
+        "image_path": "6009c74d-a367-4d0c-905f-33a529e50f2f.png",
         "priority": 2,
         "action": "click"
       },
       {
         "id": "cand_1792844431138_12",
         "name": "1eaac8ef-477b-48e2-adc6-a2c6dd8f9909.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/1eaac8ef-477b-48e2-adc6-a2c6dd8f9909.png",
+        "image_path": "1eaac8ef-477b-48e2-adc6-a2c6dd8f9909.png",
         "priority": 2,
         "action": "click",
         "next_mode": "stop",
@@ -110,7 +110,7 @@
       {
         "id": "cand_1792844539794_13",
         "name": "6fc43295-20ec-47df-bb8b-8dcc9f61a997.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/6fc43295-20ec-47df-bb8b-8dcc9f61a997.png",
+        "image_path": "6fc43295-20ec-47df-bb8b-8dcc9f61a997.png",
         "priority": 2,
         "action": "click",
         "next_mode": "stop",
@@ -119,7 +119,7 @@
       {
         "id": "cand_1792844810404_14",
         "name": "9662f5c0-0a43-4746-af9c-8a158b429e4d.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/9662f5c0-0a43-4746-af9c-8a158b429e4d.png",
+        "image_path": "9662f5c0-0a43-4746-af9c-8a158b429e4d.png",
         "priority": 2,
         "action": "right_click",
         "next_mode": "stop",
@@ -128,35 +128,35 @@
       {
         "id": "cand_1792845010123_15",
         "name": "0c44d86d-a39e-401a-b856-7844d70686e5.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/0c44d86d-a39e-401a-b856-7844d70686e5.png",
+        "image_path": "0c44d86d-a39e-401a-b856-7844d70686e5.png",
         "priority": 2,
         "action": "click"
       },
       {
         "id": "cand_1792845119060_16",
         "name": "4e53b276-7eb5-4892-82e5-e22db9f828ca.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/4e53b276-7eb5-4892-82e5-e22db9f828ca.png",
+        "image_path": "4e53b276-7eb5-4892-82e5-e22db9f828ca.png",
         "priority": 2,
         "action": "click"
       },
       {
         "id": "cand_1792845771498_17",
         "name": "a8f15efb-0087-4a83-832a-49fc372a5523.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/a8f15efb-0087-4a83-832a-49fc372a5523.png",
+        "image_path": "a8f15efb-0087-4a83-832a-49fc372a5523.png",
         "priority": 2,
         "action": "click"
       },
       {
         "id": "cand_1792845894263_18",
         "name": "0b7510e2-454f-440c-8af8-2fb1a536b0a6.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/0b7510e2-454f-440c-8af8-2fb1a536b0a6.png",
+        "image_path": "0b7510e2-454f-440c-8af8-2fb1a536b0a6.png",
         "priority": 2,
         "action": "right_click"
       },
       {
         "id": "cand_1792845894263_19",
         "name": "dc1a23e0-3129-4419-b24e-b26d1908f182.png",
-        "image_path": "C:/Users/laohu/Desktop/ceshi/dc1a23e0-3129-4419-b24e-b26d1908f182.png",
+        "image_path": "dc1a23e0-3129-4419-b24e-b26d1908f182.png",
         "priority": 2,
         "action": "right_click"
       }
