@@ -675,27 +675,15 @@ class RuleDialog(tk.Toplevel):
             self.conf_frame.pack_forget()
             self.sec_cands.pack_forget()
         elif t == "color":
-            self.lbl_target.config(text="坐标与HEX颜色:")
+            self.lbl_target.config(text="坐标与HEX颜色(X,Y,#HEX):")
             self.target_frame.pack(fill=tk.X, pady=3)
-            self.btn_browse.pack_forget()
-            self.btn_snip.pack_forget()
-            self.conf_frame.pack_forget()
-            self.sec_cands.pack_forget()
-        elif t == "timer":
-            self.lbl_target.config(text="定时说明:")
-            self.target_frame.pack(fill=tk.X, pady=3)
-            self.btn_browse.pack_forget()
-            self.btn_snip.pack_forget()
-            self.conf_frame.pack_forget()
-            self.sec_cands.pack_forget()
-        elif t == "color":
-            self.lbl_target.config(text="坐标与HEX颜色:")
             self.btn_browse.pack_forget()
             self.btn_snip.pack_forget()
             self.conf_frame.pack_forget()
             self.sec_cands.pack_forget()
         elif t == "timer":
             self.lbl_target.config(text="定时备注说明:")
+            self.target_frame.pack(fill=tk.X, pady=3)
             self.btn_browse.pack_forget()
             self.btn_snip.pack_forget()
             self.conf_frame.pack_forget()
@@ -877,9 +865,24 @@ class RealScreenScanBot:
         if os.path.exists(file_path):
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
-                    self.rules = json.load(f)
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        self.rules = data
+                    elif isinstance(data, dict):
+                        self.rules = data.get("rules", [])
             except Exception:
                 self.rules = []
+        # 恢复持久化的 ROI 区域设置
+        settings_path = os.path.join(os.getcwd(), "rpa_settings.json")
+        if os.path.exists(settings_path):
+            try:
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    st = json.load(f)
+                    reg = st.get("target_region")
+                    if reg and len(reg) == 4:
+                        self.target_region = tuple(reg)
+            except Exception:
+                pass
         if not self.rules:
             self.rules = json.loads('''[
   {
@@ -991,6 +994,15 @@ class RealScreenScanBot:
                 json.dump(self.rules, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
+        # 持久化 ROI 区域配置到 rpa_settings.json，重启不丢失
+        try:
+            settings_path = os.path.join(os.getcwd(), "rpa_settings.json")
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "target_region": list(self.target_region) if self.target_region else None
+                }, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     def create_widgets(self):
         # 1. 顶部自适应标题与热键栏
@@ -1070,7 +1082,15 @@ class RealScreenScanBot:
         tk.Button(row1, text="⬇️ 下移", command=self.move_down, bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=6, pady=2).pack(side=tk.LEFT, padx=(0, 10))
         tk.Button(row1, text="🎯 框选监控区域(ROI)", command=self.start_roi_selection, bg="#0d9488", fg="white", font=("Microsoft YaHei UI", 8, "bold"), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 4))
         tk.Button(row1, text="🌐 重置全屏", command=self.reset_roi_fullscreen, bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=6, pady=2).pack(side=tk.LEFT, padx=(0, 6))
-        self.lbl_roi_status = tk.Label(row1, text="🌐 全屏监控", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8))
+        if getattr(self, "target_region", None) and len(self.target_region) == 4:
+            w_roi = self.target_region[2] - self.target_region[0]
+            h_roi = self.target_region[3] - self.target_region[1]
+            init_roi_txt = f"🎯 ROI: ({self.target_region[0]},{self.target_region[1]})-({self.target_region[2]},{self.target_region[3]}) [{w_roi}x{h_roi}]"
+            init_roi_fg = "#10b981"
+        else:
+            init_roi_txt = "🌐 全屏监控"
+            init_roi_fg = "#94a3b8"
+        self.lbl_roi_status = tk.Label(row1, text=init_roi_txt, bg="#0f172a", fg=init_roi_fg, font=("Microsoft YaHei UI", 8))
         self.lbl_roi_status.pack(side=tk.LEFT)
 
         row2 = tk.Frame(btn_bar, bg="#0f172a")
@@ -1197,6 +1217,19 @@ class RealScreenScanBot:
                 pass
         threading.Thread(target=_test, daemon=True).start()
 
+    def is_self_window(self, x, y):
+        """判断屏幕全局物理坐标 (x, y) 是否落在本软件自身主窗口内，防止误触点到自己"""
+        try:
+            if not hasattr(self, "root") or not self.root:
+                return False
+            wx = self.root.winfo_rootx()
+            wy = self.root.winfo_rooty()
+            ww = self.root.winfo_width()
+            wh = self.root.winfo_height()
+            return (wx <= x <= wx + ww) and (wy <= y <= wy + wh)
+        except Exception:
+            return False
+
     def test_real_click_selected_rule(self):
         sel = self.tree.selection()
         if not sel:
@@ -1211,10 +1244,11 @@ class RealScreenScanBot:
             self.log(f"⏳ 【单步真实点击测试】将在 2 秒后对步骤【{rule['name']}】执行真实物理点击！请切换至目标窗口...")
             time.sleep(2.0)
             
-            screenshot = ImageGrab.grab()
+            region = getattr(self, "target_region", None)
+            screenshot = ImageGrab.grab(bbox=region)
             screen_np = np.array(screenshot)
             screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
-            ret = self.detect_single_rule(rule, screenshot, screen_gray)
+            ret = self.detect_single_rule(rule, screenshot, screen_gray, region=region)
             matched, info, coord, score = ret[:4]
             cand = ret[4] if len(ret) == 5 else None
             
@@ -1241,6 +1275,8 @@ class RealScreenScanBot:
                     winsound.Beep(1200, 120)
                 except Exception:
                     pass
+            elif matched and not coord:
+                self.log(f"⚠️ 规则条件满足但未返回有效点击坐标 (类型: {rule.get('type')})，无需物理点击: {info}")
             else:
                 self.log(f"❌ 未检测到目标，无法执行真实点击: {info}")
                 messagebox.showwarning("测试未命中", f"未找到目标位置，无法执行点击：\n{info}")
@@ -1347,9 +1383,14 @@ class RealScreenScanBot:
             hex_color = "#{:02x}{:02x}{:02x}".format(rgb[0], rgb[1], rgb[2])
             val_str = f"{x},{y},{hex_color}"
             self.log(f"🎯 吸管采集成功！坐标: ({x}, {y}) | RGB: {rgb} | HEX: {hex_color}")
-            messagebox.showinfo("吸管取色结果", f"坐标与颜色参数：\n{val_str}\n\n已自动复制到剪贴板！")
-            self.root.clipboard_clear()
-            self.root.clipboard_append(val_str)
+            def _ui_done():
+                try:
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append(val_str)
+                except Exception:
+                    pass
+                messagebox.showinfo("吸管取色结果", f"坐标与颜色参数：\n{val_str}\n\n已自动复制到剪贴板！")
+            self.root.after(0, _ui_done)
 
         threading.Thread(target=_picker_thread, daemon=True).start()
 
@@ -1408,6 +1449,7 @@ class RealScreenScanBot:
         self.target_region = None
         self.lbl_roi_status.config(text="🌐 全屏监控", fg="#94a3b8")
         self.log("🌐 已恢复为全屏扫描监控模式。")
+        self.save_rules_to_file()
 
     def run_preflight_health_check(self):
         self.log("🩺 正在进行规则健康体检 (路径完整性、悬空跳转、死循环)...")
@@ -1437,6 +1479,17 @@ class RealScreenScanBot:
             fb = r.get("timeout_target_id")
             if fb and fb not in rule_ids:
                 issues.append(f"⚠️ 步骤【{r_name}】超时兜底 ID 悬空 (不存在): {fb}")
+
+            if r.get("type") == "color" and self.target_region:
+                try:
+                    parts = [p.strip() for p in r.get("target", "").split(",")]
+                    if len(parts) >= 2:
+                        cx, cy = int(parts[0]), int(parts[1])
+                        rx1, ry1, rx2, ry2 = self.target_region
+                        if not (rx1 <= cx <= rx2 and ry1 <= cy <= ry2):
+                            issues.append(f"⚠️ 步骤【{r_name}】颜色取样坐标 ({cx}, {cy}) 位于当前 ROI 区域 [({rx1},{ry1}) 到 ({rx2},{ry2})] 外部，运行时将无法检测！")
+                except Exception:
+                    pass
 
         if not issues:
             self.log("✅ 【规则健康体检通过】所有图片路径真实有效，流转跳转关系完整，无悬空死链！")
@@ -1539,7 +1592,7 @@ class RealScreenScanBot:
             screen_np = np.array(screenshot)
             screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
 
-            ret = self.detect_single_rule(rule, screenshot, screen_gray)
+            ret = self.detect_single_rule(rule, screenshot, screen_gray, region=region)
             matched, info, coord, score = ret[:4]
             cand = ret[4] if len(ret) == 5 else None
 
@@ -1565,7 +1618,7 @@ class RealScreenScanBot:
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def detect_single_rule(self, rule, screenshot_pil, screen_gray):
+    def detect_single_rule(self, rule, screenshot_pil, screen_gray, region=None):
         r_type = rule.get("type", "image")
         target = rule.get("target", "")
 
@@ -1716,6 +1769,8 @@ class RealScreenScanBot:
                             for kw in kws:
                                 if fuzzy_match(kw, txt):
                                     words = line.get('words') if hasattr(line, 'get') else getattr(line, 'words', [])
+                                    variant_name = ["原图", "CLAHE增强", "Otsu二值", "反色二值"][idx] if idx < 4 else "预处理"
+                                    sc = 1.0 if kw == txt else (0.95 if kw in txt else 0.82)
                                     if words:
                                         w0 = getattr(words[0], 'bounding_rect', None) or (words[0].get('bounding_rect') if hasattr(words[0], 'get') else None)
                                         w1 = getattr(words[-1], 'bounding_rect', None) or (words[-1].get('bounding_rect') if hasattr(words[-1], 'get') else None)
@@ -1729,11 +1784,9 @@ class RealScreenScanBot:
                                         cy = (w0_y + w1_y + w1_h) // 2
                                         scale = 1.0 if idx == 0 else 2.0
                                         cx, cy = int(cx / scale), int(cy / scale)
+                                        return True, f"智能OCR({variant_name})识别 '{kw}' (文本: '{txt}')", (cx, cy), sc, None
                                     else:
-                                        cx, cy = 0, 0
-                                    variant_name = ["原图", "CLAHE增强", "Otsu二值", "反色二值"][idx] if idx < 4 else "预处理"
-                                    sc = 1.0 if kw == txt else (0.95 if kw in txt else 0.82)
-                                    return True, f"智能OCR({variant_name})识别 '{kw}' (文本: '{txt}')", (cx, cy), sc, None
+                                        return True, f"智能OCR({variant_name})识别到 '{kw}' (文本: '{txt}')，但无单词坐标(words为空，已置None阻止误点)", None, sc, None
                 sample = " | ".join(list(set(found_all))[:8]) if found_all else "无"
                 return False, f"未匹配关键词 {kws}。OCR识别到: [{sample}]", None, 0.0, None
             except Exception as e:
@@ -1745,10 +1798,17 @@ class RealScreenScanBot:
                 if len(parts) >= 3:
                     cx, cy = int(parts[0]), int(parts[1])
                     hex_expect = parts[2].lower()
-                    rgb_actual = screenshot_pil.getpixel((cx, cy))
+                    rx = region[0] if region else 0
+                    ry = region[1] if region else 0
+                    lx = cx - rx
+                    ly = cy - ry
+                    w, h = screenshot_pil.size
+                    if not (0 <= lx < w and 0 <= ly < h):
+                        return False, f"颜色采样坐标 ({cx}, {cy}) 落在当前 ROI 监控区域 [({rx},{ry}) 到 ({rx+w},{ry+h})] 外，无法采样", None, 0.0, None
+                    rgb_actual = screenshot_pil.getpixel((lx, ly))
                     hex_actual = "#{:02x}{:02x}{:02x}".format(rgb_actual[0], rgb_actual[1], rgb_actual[2])
                     if hex_expect == hex_actual:
-                        return True, f"坐标 ({cx}, {cy}) 颜色完全匹配: {hex_actual}", (cx, cy), 1.0, None
+                        return True, f"坐标 ({cx}, {cy}) 颜色完全匹配: {hex_actual}", (lx, ly), 1.0, None
                     else:
                         return False, f"坐标 ({cx}, {cy}) 实际颜色 {hex_actual} != 预期 {hex_expect}", None, 0.0, None
             except Exception as e:
@@ -1930,7 +1990,7 @@ class RealScreenScanBot:
                                 screenshot = ImageGrab.grab(bbox=region)
                                 screen_np = np.array(screenshot)
                                 screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
-                                ret = self.detect_single_rule(fallback_r, screenshot, screen_gray)
+                                ret = self.detect_single_rule(fallback_r, screenshot, screen_gray, region=region)
                                 matched, info, coord, score = ret[:4]
                                 cand = ret[4] if len(ret) == 5 else None
                                 rx = region[0] if region else 0
@@ -1990,7 +2050,7 @@ class RealScreenScanBot:
                     if r_cd > 0 and (now - self.rule_last_fire.get(r["id"], 0.0)) < r_cd:
                         continue
 
-                    ret = self.detect_single_rule(r, screenshot, screen_gray)
+                    ret = self.detect_single_rule(r, screenshot, screen_gray, region=region)
                     is_match, info, coord, score = ret[:4]
                     cand = ret[4] if len(ret) == 5 else None
 
@@ -2157,17 +2217,13 @@ class RealScreenScanBot:
         ix, iy = coord if coord else (0, 0)
 
         # 护栏1: 排除工具自身窗口，防止点到自己的 UI 导致混乱
-        if coord:
-            try:
-                rx = self.root.winfo_rootx()
-                ry = self.root.winfo_rooty()
-                rw = self.root.winfo_width()
-                rh = self.root.winfo_height()
-                if (rx <= ix <= rx + rw) and (ry <= iy <= ry + rh):
-                    self.log(f"🛑 【安全熔断】目标坐标 ({ix}, {iy}) 位于本软件自身窗口内！已自动拦截，防止点到自己。")
-                    return
-            except Exception:
-                pass
+        if coord and self.is_self_window(ix, iy):
+            self.log(f"🛑 【安全熔断】目标坐标 ({ix}, {iy}) 位于本软件自身窗口内！已自动拦截，防止点到自己。")
+            return
+
+        if not coord and action in ("click", "double_click", "right_click"):
+            self.log(f"⚠️ 【安全跳过】步骤【{rule.get('name')}】执行动作【{action}】需要坐标，但当前目标无坐标(coord=None)，跳过物理点击以防误触！")
+            return
 
         # 护栏2: Dry-Run 仿真演练拦截
         if getattr(self, "dry_run", False):

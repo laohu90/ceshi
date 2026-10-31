@@ -11,8 +11,8 @@
     "offset_y": 0,
     "action": "click",
     "action_param": "",
-    "cooldown": 0.0,
-    "lock_exclusive": 10000.0,
+    "cooldown": 1.0,
+    "lock_exclusive": 0.0,
     "next_mode": "loop",
     "next_target_id": "",
     "timeout_target_id": "",
@@ -23,142 +23,171 @@
         "id": "cand_1792842055560_1",
         "name": "4d9520d8-8de4-44c0-b446-dd0b95fe9838.png",
         "image_path": "4d9520d8-8de4-44c0-b446-dd0b95fe9838.png",
-        "priority": 2,
-        "action": "click"
+        "priority": 1,
+        "action": "click",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792842055560_2",
         "name": "6a189871-aed5-4b17-abde-b721c8425999.png",
         "image_path": "6a189871-aed5-4b17-abde-b721c8425999.png",
         "priority": 2,
-        "action": "click"
+        "action": "click",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792842055560_4",
         "name": "27cd3e7f-18de-45eb-af9f-be0eabbb9188.png",
         "image_path": "27cd3e7f-18de-45eb-af9f-be0eabbb9188.png",
-        "priority": 2,
-        "action": "click"
+        "priority": 3,
+        "action": "click",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792842055560_7",
         "name": "bd275335-4962-4c99-8c37-2fa95c071225.png",
         "image_path": "bd275335-4962-4c99-8c37-2fa95c071225.png",
-        "priority": 2,
-        "action": "click"
+        "priority": 4,
+        "action": "click",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792842055560_8",
         "name": "cb7f580b-e6bd-465b-9966-c2f4653fb38c.png",
         "image_path": "cb7f580b-e6bd-465b-9966-c2f4653fb38c.png",
-        "priority": 2,
-        "action": "click"
+        "priority": 5,
+        "action": "click",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792842055560_9",
         "name": "cbcefa02-9df7-4ea0-8157-12907272a799.png",
         "image_path": "cbcefa02-9df7-4ea0-8157-12907272a799.png",
-        "priority": 2,
+        "priority": 6,
         "action": "click",
         "next_mode": "stop",
-        "next_target_id": ""
+        "next_target_id": "",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792842055560_10",
         "name": "d50a3936-04a5-4669-b25e-60c70277ff96.png",
         "image_path": "d50a3936-04a5-4669-b25e-60c70277ff96.png",
-        "priority": 2,
-        "action": "click"
-      },
-      {
-        "id": "cand_1792843662448_8",
-        "name": "候选图-8",
-        "image_path": "",
-        "priority": 2,
-        "action": "click"
+        "priority": 7,
+        "action": "click",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792843798263_10",
         "name": "321e2cac-e99b-4588-8426-a23503098d42.png",
         "image_path": "321e2cac-e99b-4588-8426-a23503098d42.png",
-        "priority": 2,
-        "action": "click"
+        "priority": 8,
+        "action": "click",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792843932154_10",
         "name": "91778fd4-fea5-4259-8555-2c026f28342b.png",
         "image_path": "91778fd4-fea5-4259-8555-2c026f28342b.png",
-        "priority": 2,
-        "action": "click"
+        "priority": 9,
+        "action": "click",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792844061107_11",
         "name": "6009c74d-a367-4d0c-905f-33a529e50f2f.png",
         "image_path": "6009c74d-a367-4d0c-905f-33a529e50f2f.png",
-        "priority": 2,
-        "action": "click"
+        "priority": 10,
+        "action": "click",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792844431138_12",
         "name": "1eaac8ef-477b-48e2-adc6-a2c6dd8f9909.png",
         "image_path": "1eaac8ef-477b-48e2-adc6-a2c6dd8f9909.png",
-        "priority": 2,
+        "priority": 11,
         "action": "click",
         "next_mode": "stop",
-        "next_target_id": ""
+        "next_target_id": "",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792844539794_13",
         "name": "6fc43295-20ec-47df-bb8b-8dcc9f61a997.png",
         "image_path": "6fc43295-20ec-47df-bb8b-8dcc9f61a997.png",
-        "priority": 2,
+        "priority": 12,
         "action": "click",
         "next_mode": "stop",
-        "next_target_id": ""
+        "next_target_id": "",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792844810404_14",
         "name": "9662f5c0-0a43-4746-af9c-8a158b429e4d.png",
         "image_path": "9662f5c0-0a43-4746-af9c-8a158b429e4d.png",
-        "priority": 2,
+        "priority": 13,
         "action": "right_click",
         "next_mode": "stop",
-        "next_target_id": ""
+        "next_target_id": "",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792845010123_15",
         "name": "0c44d86d-a39e-401a-b856-7844d70686e5.png",
         "image_path": "0c44d86d-a39e-401a-b856-7844d70686e5.png",
-        "priority": 2,
-        "action": "click"
+        "priority": 14,
+        "action": "click",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792845119060_16",
         "name": "4e53b276-7eb5-4892-82e5-e22db9f828ca.png",
         "image_path": "4e53b276-7eb5-4892-82e5-e22db9f828ca.png",
-        "priority": 2,
-        "action": "click"
+        "priority": 15,
+        "action": "click",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792845771498_17",
         "name": "a8f15efb-0087-4a83-832a-49fc372a5523.png",
         "image_path": "a8f15efb-0087-4a83-832a-49fc372a5523.png",
-        "priority": 2,
-        "action": "click"
+        "priority": 16,
+        "action": "click",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792845894263_18",
         "name": "0b7510e2-454f-440c-8af8-2fb1a536b0a6.png",
         "image_path": "0b7510e2-454f-440c-8af8-2fb1a536b0a6.png",
-        "priority": 2,
-        "action": "right_click"
+        "priority": 17,
+        "action": "right_click",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       },
       {
         "id": "cand_1792845894263_19",
         "name": "dc1a23e0-3129-4419-b24e-b26d1908f182.png",
         "image_path": "dc1a23e0-3129-4419-b24e-b26d1908f182.png",
-        "priority": 2,
-        "action": "right_click"
+        "priority": 18,
+        "action": "right_click",
+        "cooldown": 1.0,
+        "lock_exclusive": 0.0
       }
     ]
   }
