@@ -178,7 +178,7 @@ class RuleDialog(tk.Toplevel):
         self.rule = rule if rule else {
             "id": f"r_{int(time.time()*1000)}",
             "name": f"智能步骤-{len(self.all_rules)+1}",
-            "priority": 50,
+            "priority": 1,
             "enabled": True,
             "type": "image",
             "target": "",
@@ -370,6 +370,7 @@ class RuleDialog(tk.Toplevel):
         self.next_mode_var = tk.StringVar(value=self.rule.get("next_mode", "loop"))
         flow_combo = ttk.Combobox(fl1, textvariable=self.next_mode_var, values=[
             "loop (默认自由全规则循环)",
+            "sequence (顺序流转到下一步)",
             "jump (成功命中后：指定跳转到下一个特定步骤)",
             "stop (流程终点：执行完本动作后自动终止脚本)"
         ], state="readonly", width=38, font=("Microsoft YaHei UI", 9))
@@ -802,6 +803,13 @@ class RuleDialog(tk.Toplevel):
             self.on_save(self.rule)
         self.destroy()
 
+    def destroy(self):
+        try:
+            self.unbind_all("<MouseWheel>")
+        except Exception:
+            pass
+        super().destroy()
+
 
 
 class RealScreenScanBot:
@@ -829,6 +837,10 @@ class RealScreenScanBot:
         self.locked_rule_id = None
         self.lock_expire_time = 0
         self.last_action_timestamp = time.time()
+        self.heartbeat = time.time()
+        self.template_cache = {}
+        self.target_region = None
+        self.bot_interval = 0.8
         self.anti_stuck_threshold = 45.0 # 45秒防卡死看门狗
 
         self.compact_mode = False
@@ -1108,20 +1120,10 @@ class RealScreenScanBot:
             while True:
                 time.sleep(3.0)
                 if self.running:
-                    elapsed = time.time() - self.last_action_timestamp
+                    elapsed = time.time() - getattr(self, "heartbeat", time.time())
                     if elapsed > self.anti_stuck_threshold:
-                        self.log("⚠️ 【看门狗防卡死触发】工作流停留过久，启动智能自愈：微动鼠标并唤醒焦点...")
-                        try:
-                            cx, cy = pyautogui.position()
-                            pyautogui.moveTo(cx + 3, cy + 3, duration=0.1)
-                            pyautogui.moveTo(cx, cy, duration=0.1)
-                            user32 = ctypes.windll.user32
-                            user32.keybd_event(0x1B, 0, 0, 0)
-                            time.sleep(0.05)
-                            user32.keybd_event(0x1B, 0, 2, 0)
-                        except Exception:
-                            pass
-                        self.last_action_timestamp = time.time()
+                        self.log(f"⚠️ 【看门狗心跳超时】状态机主线程心跳已超时 ({int(elapsed)}s > {self.anti_stuck_threshold}s)！请检查是否存在阻塞。")
+                        self.heartbeat = time.time()
         threading.Thread(target=_watchdog_loop, daemon=True).start()
 
     def restart_as_admin(self):
@@ -1166,7 +1168,9 @@ class RealScreenScanBot:
             screenshot = ImageGrab.grab()
             screen_np = np.array(screenshot)
             screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
-            matched, info, coord, score = self.detect_single_rule(rule, screenshot, screen_gray)
+            ret = self.detect_single_rule(rule, screenshot, screen_gray)
+            matched, info, coord, score = ret[:4]
+            cand = ret[4] if len(ret) == 5 else None
             
             if matched and coord:
                 ox = rule.get("offset_x", 0)
@@ -1193,8 +1197,8 @@ class RealScreenScanBot:
         id_to_name = {r["id"]: r["name"] for r in self.rules}
 
         for r in self.rules:
-            prio = r.get("priority", 50)
-            prio_str = f"P{prio} 🔥" if prio >= 80 else f"P{prio}"
+            prio = r.get("priority", 1)
+            prio_str = f"P{prio}"
             en_str = "✅ 开启" if r.get("enabled", True) else "❌ 停用"
             t_map = {"image": "🖼️ 多图", "text": "🔤 智能OCR", "image_vanish": "🚫 消失", "color": "🎨 颜色", "timer": "⏰ 定时"}
             t_name = t_map.get(r["type"], r["type"])
@@ -1203,6 +1207,8 @@ class RealScreenScanBot:
             if flow_mode == "jump":
                 tgt_name = id_to_name.get(r.get("next_target_id"), "指定步骤")
                 next_str = f"➡️ 跳转: {tgt_name} (限{r.get('next_timeout', 20)}s)"
+            elif flow_mode == "sequence":
+                next_str = "🔄 顺序流转下一步"
             elif flow_mode == "stop":
                 next_str = "⏹️ 终止脚本"
             else:
@@ -1341,10 +1347,24 @@ class RealScreenScanBot:
         self.log("💡 [全局热键就绪] Win32 底层全局监听已激活 (F8 启动 / F9 停止)！")
 
     def log(self, message):
-        self.log_box.config(state=tk.NORMAL)
-        self.log_box.insert(tk.END, f"[{time.strftime('%H:%M:%S')}] {message}\n")
-        self.log_box.see(tk.END)
-        self.log_box.config(state=tk.DISABLED)
+        try:
+            self.root.after(0, self._log_ui, message)
+        except Exception:
+            print(f"[{time.strftime('%H:%M:%S')}] {message}")
+
+    def _log_ui(self, message):
+        try:
+            self.log_box.config(state=tk.NORMAL)
+            line_count = int(float(self.log_box.index('end-1c').split('.')[0]))
+            if line_count > 2000:
+                delete_lines = line_count - 1800
+                if delete_lines > 0:
+                    self.log_box.delete("1.0", f"{delete_lines + 1}.0")
+            self.log_box.insert(tk.END, f"[{time.strftime('%H:%M:%S')}] {message}\n")
+            self.log_box.see(tk.END)
+            self.log_box.config(state=tk.DISABLED)
+        except Exception:
+            pass
 
     def test_single_rule_detection(self):
         sel = self.tree.selection()
@@ -1356,32 +1376,38 @@ class RealScreenScanBot:
         if not rule:
             return
 
-        self.log(f"🔍 正在测试步骤【{rule['name']}】...")
-        screenshot = ImageGrab.grab()
-        screen_np = np.array(screenshot)
-        screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
+        def _worker():
+            self.log(f"🔍 正在测试步骤【{rule['name']}】...")
+            region = getattr(self, "target_region", None)
+            screenshot = ImageGrab.grab(bbox=region)
+            screen_np = np.array(screenshot)
+            screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
 
-        ret = self.detect_single_rule(rule, screenshot, screen_gray)
-        cand = None
-        if len(ret) == 5:
-            matched, info, coord, score, cand = ret
-        else:
-            matched, info, coord, score = ret
+            ret = self.detect_single_rule(rule, screenshot, screen_gray)
+            matched, info, coord, score = ret[:4]
+            cand = ret[4] if len(ret) == 5 else None
 
-        if matched:
-            self.log(f"🎉 【测试成功！】{info} (得分: {int(score * 100)}%)")
-            if coord:
-                ox = cand.get("offset_x", rule.get("offset_x", 0)) if cand else rule.get("offset_x", 0)
-                oy = cand.get("offset_y", rule.get("offset_y", 0)) if cand else rule.get("offset_y", 0)
-                tx, ty = coord[0] + ox, coord[1] + oy
-                pyautogui.moveTo(tx, ty, duration=0.25)
-                cand_info = f"\n命中胜出候选图: 【{cand.get('name')}】(优先级 P{cand.get('priority')})" if cand else ""
-                messagebox.showinfo("检测成功", f"🎉 成功找到目标！{cand_info}\n{info}\n物理中心: ({coord[0]}, {coord[1]})\n含偏移: ({tx}, {ty})\n相似得分: {int(score * 100)}%\n光标已平滑移动到该位置！")
+            if matched:
+                self.log(f"🎉 【测试成功！】{info} (得分: {int(score * 100)}%)")
+                if coord:
+                    ox = cand.get("offset_x", rule.get("offset_x", 0)) if cand else rule.get("offset_x", 0)
+                    oy = cand.get("offset_y", rule.get("offset_y", 0)) if cand else rule.get("offset_y", 0)
+                    rx = region[0] if region else 0
+                    ry = region[1] if region else 0
+                    tx, ty = coord[0] + rx + ox, coord[1] + ry + oy
+                    try:
+                        pyautogui.moveTo(tx, ty, duration=0.25)
+                    except Exception:
+                        pass
+                    cand_info = f"\n命中胜出候选图: 【{cand.get('name')}】(优先级 P{cand.get('priority')})" if cand else ""
+                    self.root.after(0, lambda: messagebox.showinfo("检测成功", f"🎉 成功找到目标！{cand_info}\n{info}\n物理中心: ({coord[0] + rx}, {coord[1] + ry})\n含偏移: ({tx}, {ty})\n相似得分: {int(score * 100)}%\n光标已平滑移动到该位置！"))
+                else:
+                    self.root.after(0, lambda: messagebox.showinfo("检测成功", f"🎉 规则条件满足！\n{info}"))
             else:
-                messagebox.showinfo("检测成功", f"🎉 规则条件满足！\n{info}")
-        else:
-            self.log(f"❌ 【测试未命中】{info}")
-            messagebox.showwarning("检测未命中", f"未找到目标！原因分析：\n{info}")
+                self.log(f"❌ 【测试未命中】{info}")
+                self.root.after(0, lambda: messagebox.showwarning("检测未命中", f"未找到目标！原因分析：\n{info}"))
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def detect_single_rule(self, rule, screenshot_pil, screen_gray):
         r_type = rule.get("type", "image")
@@ -1404,14 +1430,18 @@ class RealScreenScanBot:
                     c_best_score = 0.0
                     c_best_coord = None
                     c_best_info = ""
-                    for p in paths:
-                        if os.path.exists(p):
-                            matched, info, coord, sc = self._match_template(p, screen_gray, c_conf)
-                            if matched and sc > c_best_score:
-                                c_matched = True
-                                c_best_score = sc
-                                c_best_coord = coord
-                                c_best_info = f"图片[{c.get('name') or os.path.basename(p)}]: {info}"
+                    missing_paths = [p for p in paths if not os.path.exists(p)]
+                    valid_paths = [p for p in paths if os.path.exists(p)]
+                    if missing_paths and not valid_paths:
+                        self.log(f"⚠️ 【候选图文件缺失】步骤【{rule.get('name')}】候选[{c.get('name') or '图'}]文件缺失: {', '.join(missing_paths)}")
+
+                    for p in valid_paths:
+                        matched, info, coord, sc = self._match_template(p, screen_gray, c_conf)
+                        if matched and sc > c_best_score:
+                            c_matched = True
+                            c_best_score = sc
+                            c_best_coord = coord
+                            c_best_info = f"图片[{c.get('name') or os.path.basename(p)}]: {info}"
                     if c_matched:
                         matched_cands.append({
                             "candidate": c,
@@ -1437,40 +1467,47 @@ class RealScreenScanBot:
             paths = [p.strip() for p in target.replace("|", ";").split(";") if p.strip()]
             if not paths:
                 return False, "未填写目标图片路径", None, 0.0, None
+            missing_paths = [p for p in paths if not os.path.exists(p)]
+            valid_paths = [p for p in paths if os.path.exists(p)]
+            if missing_paths and not valid_paths:
+                return False, f"目标图片文件缺失: {', '.join(missing_paths)}", None, 0.0, None
+
             best_score = 0.0
             best_res = (False, f"候选图片未命中(共{len(paths)}张)", None, 0.0, None)
-            for p in paths:
-                if os.path.exists(p):
-                    matched, info, coord, sc = self._match_template(p, screen_gray, float(rule.get("confidence", 0.70)))
-                    if matched and sc > best_score:
-                        best_score = sc
-                        best_res = (True, f"多图匹配成功[{os.path.basename(p)}]: {info}", coord, sc, None)
+            for p in valid_paths:
+                matched, info, coord, sc = self._match_template(p, screen_gray, float(rule.get("confidence", 0.70)))
+                if matched and sc > best_score:
+                    best_score = sc
+                    best_res = (True, f"多图匹配成功[{os.path.basename(p)}]: {info}", coord, sc, None)
             return best_res
 
         elif r_type == "image_vanish":
             paths = [p.strip() for p in target.replace("|", ";").split(";") if p.strip()]
             if not paths:
-                return False, "未填写目标图片路径", None, 0.0
+                return False, "未填写目标图片路径", None, 0.0, None
+            missing_paths = [p for p in paths if not os.path.exists(p)]
+            valid_paths = [p for p in paths if os.path.exists(p)]
+            if missing_paths and not valid_paths:
+                return False, f"目标图片文件缺失: {', '.join(missing_paths)}", None, 0.0, None
             any_exists = False
             last_info = ""
-            for p in paths:
-                if os.path.exists(p):
-                    matched, info, coord, sc = self._match_template(p, screen_gray, float(rule.get("confidence", 0.70)))
-                    if matched:
-                        any_exists = True
-                        last_info = info
-                        break
+            for p in valid_paths:
+                matched, info, coord, sc = self._match_template(p, screen_gray, float(rule.get("confidence", 0.70)))
+                if matched:
+                    any_exists = True
+                    last_info = info
+                    break
             if not any_exists:
-                return True, "目标图片均已在屏幕上消失！(反向消失触发满足)", None, 0.85
+                return True, "目标图片均已在屏幕上消失！(反向消失触发满足)", None, 0.85, None
             else:
-                return False, f"目标图片仍在屏幕上 ({last_info})", None, 0.0
+                return False, f"目标图片仍在屏幕上 ({last_info})", None, 0.0, None
 
         elif r_type == "text":
             kws = [k.strip() for k in target.replace("|", ";").split(";") if k.strip()]
             if not kws:
-                return False, "未填写要识别的文字关键词", None, 0.0
+                return False, "未填写要识别的文字关键词", None, 0.0, None
             if not WINOCR_AVAILABLE:
-                return False, "系统未加载 winocr 模块", None, 0.0
+                return False, "系统未加载 winocr 模块", None, 0.0, None
 
             def fuzzy_match(kw, txt):
                 kw = kw.strip().lower().replace(" ", "")
@@ -1515,22 +1552,35 @@ class RealScreenScanBot:
                 found_all = []
                 for idx, p_img in enumerate(pil_images):
                     result = winocr.recognize_pil_sync(p_img, 'zh-Hans-CN')
-                    if result and hasattr(result, 'lines'):
-                        for line in result.lines:
-                            txt = line.text.strip()
+                    res_lines = result.get('lines') if hasattr(result, 'get') else getattr(result, 'lines', None)
+                    if result and res_lines:
+                        for line in res_lines:
+                            txt = (line.get('text') if hasattr(line, 'get') else getattr(line, 'text', '')).strip()
                             found_all.append(txt)
                             for kw in kws:
                                 if fuzzy_match(kw, txt):
-                                    scale_factor = 2.0 if idx > 0 else 1.0
-                                    cx = int((line.box.left + line.box.width / 2) / scale_factor)
-                                    cy = int((line.box.top + line.box.height / 2) / scale_factor)
+                                    words = line.get('words') if hasattr(line, 'get') else getattr(line, 'words', [])
+                                    if words:
+                                        w0 = getattr(words[0], 'bounding_rect', None) or (words[0].get('bounding_rect') if hasattr(words[0], 'get') else None)
+                                        w1 = getattr(words[-1], 'bounding_rect', None) or (words[-1].get('bounding_rect') if hasattr(words[-1], 'get') else None)
+                                        w0_x = getattr(w0, 'x', 0) if hasattr(w0, 'x') else (w0.get('x', 0) if w0 else 0)
+                                        w0_y = getattr(w0, 'y', 0) if hasattr(w0, 'y') else (w0.get('y', 0) if w0 else 0)
+                                        w1_x = getattr(w1, 'x', 0) if hasattr(w1, 'x') else (w1.get('x', 0) if w1 else 0)
+                                        w1_y = getattr(w1, 'y', 0) if hasattr(w1, 'y') else (w1.get('y', 0) if w1 else 0)
+                                        w1_w = getattr(w1, 'width', 0) if hasattr(w1, 'width') else (w1.get('width', 0) if w1 else 0)
+                                        w1_h = getattr(w1, 'height', 0) if hasattr(w1, 'height') else (w1.get('height', 0) if w1 else 0)
+                                        cx = (w0_x + w1_x + w1_w) // 2
+                                        cy = (w0_y + w1_y + w1_h) // 2
+                                        cx, cy = int(cx / 2), int(cy / 2)
+                                    else:
+                                        cx, cy = 0, 0
                                     variant_name = ["原图", "CLAHE增强", "Otsu二值", "反色二值"][idx] if idx < 4 else "预处理"
                                     sc = 1.0 if kw == txt else (0.95 if kw in txt else 0.82)
-                                    return True, f"智能OCR({variant_name})识别 '{kw}' (文本: '{txt}')", (cx, cy), sc
+                                    return True, f"智能OCR({variant_name})识别 '{kw}' (文本: '{txt}')", (cx, cy), sc, None
                 sample = " | ".join(list(set(found_all))[:8]) if found_all else "无"
-                return False, f"未匹配关键词 {kws}。OCR识别到: [{sample}]", None, 0.0
+                return False, f"未匹配关键词 {kws}。OCR识别到: [{sample}]", None, 0.0, None
             except Exception as e:
-                return False, f"智能OCR异常: {e}", None, 0.0
+                return False, f"智能OCR异常: {e}", None, 0.0, None
 
         elif r_type == "color":
             try:
@@ -1541,28 +1591,43 @@ class RealScreenScanBot:
                     rgb_actual = screenshot_pil.getpixel((cx, cy))
                     hex_actual = "#{:02x}{:02x}{:02x}".format(rgb_actual[0], rgb_actual[1], rgb_actual[2])
                     if hex_expect == hex_actual:
-                        return True, f"坐标 ({cx}, {cy}) 颜色完全匹配: {hex_actual}", (cx, cy), 1.0
+                        return True, f"坐标 ({cx}, {cy}) 颜色完全匹配: {hex_actual}", (cx, cy), 1.0, None
                     else:
-                        return False, f"坐标 ({cx}, {cy}) 实际颜色 {hex_actual} != 预期 {hex_expect}", None, 0.0
+                        return False, f"坐标 ({cx}, {cy}) 实际颜色 {hex_actual} != 预期 {hex_expect}", None, 0.0, None
             except Exception as e:
-                return False, f"颜色解析失败(需为 X,Y,#HEX): {e}", None, 0.0
+                return False, f"颜色解析失败(需为 X,Y,#HEX): {e}", None, 0.0, None
 
         elif r_type == "timer":
-            return True, "定时循环触发", None, 0.5
+            return True, "定时循环触发", None, 0.5, None
 
-        return False, "未知识别类型", None, 0.0
+        return False, "未知识别类型", None, 0.0, None
 
     def _match_template(self, target_path, screen_gray, threshold):
         try:
-            with open(target_path, "rb") as f:
-                t_bytes = bytearray(f.read())
-            t_np = np.asarray(t_bytes, dtype=np.uint8)
-            t_cv = cv2.imdecode(t_np, cv2.IMREAD_COLOR)
-            if t_cv is None:
-                return False, "图片文件解码失败", None, 0.0
+            if not hasattr(self, 'template_cache'):
+                self.template_cache = {}
 
-            t_gray = cv2.cvtColor(t_cv, cv2.COLOR_BGR2GRAY)
-            th_h, th_w = t_gray.shape
+            mtime = os.path.getmtime(target_path) if os.path.exists(target_path) else 0
+            cached = self.template_cache.get(target_path)
+            if cached and cached.get("mtime") == mtime:
+                t_gray = cached["gray"]
+                th_h, th_w = cached["size"]
+            else:
+                with open(target_path, "rb") as f:
+                    t_bytes = bytearray(f.read())
+                t_np = np.asarray(t_bytes, dtype=np.uint8)
+                t_cv = cv2.imdecode(t_np, cv2.IMREAD_COLOR)
+                if t_cv is None:
+                    return False, "图片文件解码失败", None, 0.0, None
+
+                t_gray = cv2.cvtColor(t_cv, cv2.COLOR_BGR2GRAY)
+                th_h, th_w = t_gray.shape
+                self.template_cache[target_path] = {
+                    "img": t_cv,
+                    "gray": t_gray,
+                    "size": (th_h, th_w),
+                    "mtime": mtime
+                }
             scr_h, scr_w = screen_gray.shape
 
             if th_w >= scr_w or th_h >= scr_h:
@@ -1615,6 +1680,11 @@ class RealScreenScanBot:
         self.locked_rule_id = None
         self.lock_expire_time = 0
         self.last_action_timestamp = time.time()
+        self.heartbeat = time.time()
+        try:
+            self.bot_interval = float(self.interval_entry.get())
+        except Exception:
+            self.bot_interval = 0.8
 
         self.btn_start.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
@@ -1628,19 +1698,22 @@ class RealScreenScanBot:
         self.running = False
         self.workflow_target_id = None
         self.locked_rule_id = None
-        self.btn_start.config(state=tk.NORMAL)
-        self.btn_stop.config(state=tk.DISABLED)
+        def _ui_stop():
+            try:
+                self.btn_start.config(state=tk.NORMAL)
+                self.btn_stop.config(state=tk.DISABLED)
+            except Exception:
+                pass
+        self.root.after(0, _ui_stop)
         self.log("⏹ [已停止] 监控已停止。随时按 [F8] 恢复。")
 
     def run_state_machine_loop(self):
-        try:
-            interval = float(self.interval_entry.get())
-        except ValueError:
-            interval = 0.8
+        interval = getattr(self, "bot_interval", 0.8)
 
         id_to_rule = {r["id"]: r for r in self.rules}
 
         while self.running:
+            self.heartbeat = time.time()
             try:
                 now = time.time()
 
@@ -1654,12 +1727,19 @@ class RealScreenScanBot:
                             fallback_r = id_to_rule.get(timeout_fallback_id)
                             if fallback_r and fallback_r.get("enabled", True):
                                 self.log(f"⏱️ 【限时未命中】等待步骤【{t_name}】超时！触发备用动作 -> 立即执行【{fallback_r['name']}】")
-                                screenshot = ImageGrab.grab()
+                                region = getattr(self, "target_region", None)
+                                screenshot = ImageGrab.grab(bbox=region)
                                 screen_np = np.array(screenshot)
                                 screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
-                                is_match, info, coord, score = self.detect_single_rule(fallback_r, screenshot, screen_gray)
-                                final_coord = (coord[0] + fallback_r.get("offset_x", 0), coord[1] + fallback_r.get("offset_y", 0)) if coord else None
-                                self.execute_smart_action(final_coord, fallback_r)
+                                ret = self.detect_single_rule(fallback_r, screenshot, screen_gray)
+                                matched, info, coord, score = ret[:4]
+                                cand = ret[4] if len(ret) == 5 else None
+                                rx = region[0] if region else 0
+                                ry = region[1] if region else 0
+                                ox = cand.get("offset_x", fallback_r.get("offset_x", 0)) if cand else fallback_r.get("offset_x", 0)
+                                oy = cand.get("offset_y", fallback_r.get("offset_y", 0)) if cand else fallback_r.get("offset_y", 0)
+                                final_coord = (coord[0] + rx + ox, coord[1] + ry + oy) if coord else None
+                                self.execute_smart_action(final_coord, fallback_r, candidate=cand)
                                 self.last_action_timestamp = time.time()
                                 self.workflow_target_id = None
                                 self.workflow_target_deadline = 0
@@ -1688,7 +1768,8 @@ class RealScreenScanBot:
                         self.locked_rule_id = None
                         active_rules = [r for r in self.rules if r.get("enabled", True)]
 
-                screenshot = ImageGrab.grab()
+                region = getattr(self, "target_region", None)
+                screenshot = ImageGrab.grab(bbox=region)
                 screen_np = np.array(screenshot)
                 screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
 
@@ -1700,11 +1781,8 @@ class RealScreenScanBot:
                         break
 
                     ret = self.detect_single_rule(r, screenshot, screen_gray)
-                    cand = None
-                    if len(ret) == 5:
-                        is_match, info, coord, score, cand = ret
-                    else:
-                        is_match, info, coord, score = ret
+                    is_match, info, coord, score = ret[:4]
+                    cand = ret[4] if len(ret) == 5 else None
 
                     if is_match:
                         candidates.append({
@@ -1747,10 +1825,18 @@ class RealScreenScanBot:
                     cand = winner.get("candidate")
                     ox = cand.get("offset_x", r.get("offset_x", 0)) if cand else r.get("offset_x", 0)
                     oy = cand.get("offset_y", r.get("offset_y", 0)) if cand else r.get("offset_y", 0)
-                    final_coord = (coord[0] + ox, coord[1] + oy) if coord else None
+                    rx = region[0] if region else 0
+                    ry = region[1] if region else 0
+                    final_coord = (coord[0] + rx + ox, coord[1] + ry + oy) if coord else None
 
                     self.log(f"🎯 触发步骤【{r['name']}】(P{winner['priority']})! {info} | 坐标: {final_coord}")
                     self.execute_smart_action(final_coord, r, candidate=cand)
+
+                    # 候选级「终止脚本」优先判断
+                    if cand and cand.get("next_mode") == "stop":
+                        self.log("🏁 【候选终结】命中候选图专属终止设置 -> 自动终止脚本！")
+                        self.stop_bot()
+                        return
 
                     # 若该候选图片配置了专属跳转步骤，优先使用
                     cand_jump = cand.get("next_target_id") if cand else None
@@ -1765,7 +1851,7 @@ class RealScreenScanBot:
                         flow_mode = r.get("next_mode", "loop")
                         if flow_mode == "stop":
                             self.log("🏁 【工作流完成】步骤设定执行后终止脚本。已自动停止！")
-                            self.root.after(0, self.stop_bot)
+                            self.stop_bot()
                             return
 
                         elif flow_mode == "jump" and r.get("next_target_id"):
@@ -1779,7 +1865,7 @@ class RealScreenScanBot:
                             next_name = next_r["name"] if next_r else next_id
                             self.log(f"🔀 【步骤链式流转】完成【{r['name']}】-> 进入下一步【{next_name}】(限时: {timeout_s}秒)！")
 
-                        else:
+                        elif flow_mode == "sequence":
                             all_enabled = [ru for ru in self.rules if ru.get("enabled", True)]
                             if all_enabled:
                                 try:
@@ -1795,6 +1881,10 @@ class RealScreenScanBot:
                             else:
                                 self.workflow_target_id = None
                                 self.workflow_target_deadline = 0
+
+                        else:  # loop 语义：重置为自由全规则循环
+                            self.workflow_target_id = None
+                            self.workflow_target_deadline = 0
 
                     lock_duration = float(r.get("lock_exclusive", 0.0))
                     if lock_duration > 0:

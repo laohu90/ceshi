@@ -15,7 +15,7 @@ if errorlevel 1 (
 )
 
 echo [1/2] Checking required libraries (keyboard, pyautogui, opencv, pillow, winocr)...
-python -c "import cv2, pyautogui, PIL, keyboard" >nul 2>&1
+python -c "import cv2, pyautogui, PIL, keyboard, winocr" >nul 2>&1
 if errorlevel 1 (
     echo Installing required libraries for global system hooks and hardware clicking...
     python -m pip install pyautogui opencv-python numpy pillow winocr keyboard
@@ -23,7 +23,7 @@ if errorlevel 1 (
 
 echo [2/2] Starting ScreenScan RPA Desktop GUI...
 echo ==========================================
-python app.py
+pythonw app.py >> run.log 2>&1
 if errorlevel 1 (
     echo.
     echo [ERROR] Python app exited. See error above.
