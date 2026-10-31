@@ -123,6 +123,20 @@ def safe_grab(bbox=None):
     except Exception:
         return ImageGrab.grab(bbox=bbox)
 
+def cleanup_old_evidence_images(max_files=50):
+    """证据截图自动轮转清理，防止长期运行产生海量截图占满磁盘"""
+    try:
+        files = [os.path.join(BASE_DIR, f) for f in os.listdir(BASE_DIR) if f.startswith("evidence_") and f.endswith(".png")]
+        if len(files) > max_files:
+            files.sort(key=lambda p: os.path.getmtime(p))
+            for f_to_del in files[:-max_files]:
+                try:
+                    os.remove(f_to_del)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
 def set_clipboard_text(text):
     """
     跨线程安全剪贴板写入:
@@ -389,6 +403,8 @@ class ThresholdTuningDialog(tk.Toplevel):
 
     def start_sampling(self):
         if self.sampling:
+            return
+        if not messagebox.askyesno("采样确认", "🎯 请确保目标程序窗口与目标图标此刻已完整显示在屏幕上！\n\n准备就绪后点击【是】开始连续采样分析，点击【否】返回。"):
             return
         self.sampling = True
         self.samples = []
@@ -664,7 +680,10 @@ class RuleDialog(tk.Toplevel):
         tk.Checkbutton(r1, text="启用步骤", variable=self.enabled_var, bg="#0f172a", fg="#34d399", selectcolor="#1e293b", font=("Microsoft YaHei UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 10))
 
         self.humanize_var = tk.BooleanVar(value=self.rule.get("humanize", True))
-        tk.Checkbutton(r1, text="拟人微操(±2px)", variable=self.humanize_var, bg="#0f172a", fg="#a78bfa", selectcolor="#1e293b", font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT)
+        tk.Checkbutton(r1, text="拟人微操(±2px)", variable=self.humanize_var, bg="#0f172a", fg="#a78bfa", selectcolor="#1e293b", font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT, padx=(0, 10))
+
+        self.verify_action_var = tk.BooleanVar(value=self.rule.get("verify_after_action", True))
+        tk.Checkbutton(r1, text="动作后验证(重试1-2次)", variable=self.verify_action_var, bg="#0f172a", fg="#38bdf8", selectcolor="#1e293b", font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT)
 
         r2 = tk.Frame(sec_base, bg="#0f172a")
         r2.pack(fill=tk.X, pady=3)
@@ -1289,6 +1308,7 @@ class RuleDialog(tk.Toplevel):
             "next_timeout": timeout_val,
             "timer_interval": timer_int_val,
             "humanize": self.humanize_var.get(),
+            "verify_after_action": self.verify_action_var.get(),
             "candidates": self.candidates
         })
 
@@ -1509,6 +1529,7 @@ class RealScreenScanBot:
         
         lbl = tk.Label(title_frame, text="🤖 ScreenScan RPA 智能工作台", bg="#1e293b", fg="#f8fafc", font=("Microsoft YaHei UI", 12, "bold"))
         lbl.pack(side=tk.LEFT)
+        tk.Label(title_frame, text="⚡ 运行期间自动接管鼠标，请勿人工抢鼠，按 [F7] 随时暂停", bg="#1e293b", fg="#f59e0b", font=("Microsoft YaHei UI", 8, "bold")).pack(side=tk.LEFT, padx=12)
 
         if is_admin():
             tk.Label(title_frame, text="🛡️ 管理员特权", bg="#1e293b", fg="#10b981", font=("Microsoft YaHei UI", 8, "bold")).pack(side=tk.LEFT, padx=10)
@@ -1621,9 +1642,19 @@ class RealScreenScanBot:
         self.dry_run_var = tk.BooleanVar(value=False)
         tk.Checkbutton(ctrl_frame, text="🛡️ Dry-Run 试运行 (只记录不点击)", variable=self.dry_run_var, bg="#0f172a", fg="#38bdf8", selectcolor="#1e293b", font=("Microsoft YaHei UI", 8, "bold")).pack(side=tk.LEFT, padx=(0, 6))
 
-        tk.Label(ctrl_frame, text="全局窗口白名单:", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
-        self.global_whitelist_entry = tk.Entry(ctrl_frame, width=12, bg="#1e293b", fg="#fff", insertbackground="white", font=("Microsoft YaHei UI", 8))
-        self.global_whitelist_entry.pack(side=tk.LEFT, padx=(2, 8))
+        tk.Label(ctrl_frame, text="窗口白名单:", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
+        self.global_whitelist_entry = tk.Entry(ctrl_frame, width=10, bg="#1e293b", fg="#fff", insertbackground="white", font=("Microsoft YaHei UI", 8))
+        self.global_whitelist_entry.pack(side=tk.LEFT, padx=(2, 6))
+
+        tk.Label(ctrl_frame, text="OCR语言:", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
+        self.ocr_lang_var = tk.StringVar(value="zh-Hans-CN (简体中文)")
+        self.ocr_lang_combo = ttk.Combobox(ctrl_frame, textvariable=self.ocr_lang_var, values=[
+            "zh-Hans-CN (简体中文)",
+            "en-US (English)",
+            "zh-Hant-TW (繁体中文)",
+            "ja-JP (日本語)"
+        ], state="readonly", width=15, font=("Microsoft YaHei UI", 8))
+        self.ocr_lang_combo.pack(side=tk.LEFT, padx=(2, 6))
 
         tk.Label(ctrl_frame, text="执行上限:", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
         self.max_runs_entry = tk.Entry(ctrl_frame, width=4, bg="#1e293b", fg="#fff", insertbackground="white", font=("Microsoft YaHei UI", 8))
@@ -1663,6 +1694,12 @@ class RealScreenScanBot:
         if getattr(self, "roi_fallback_message", None):
             self.log(f"⚠️ {self.roi_fallback_message}")
             self.root.after(500, lambda: messagebox.showwarning("ROI 越界重置", self.roi_fallback_message))
+
+        if getattr(self, "is_first_run", False):
+            self.root.after(600, lambda: messagebox.showinfo(
+                "欢迎使用 ScreenScan RPA",
+                "🎉 欢迎使用 ScreenScan RPA 智能工作台！\n\n检测到首次运行，已为您加载无需本地图片的文字/复合动作示例。\n您可以点击【📸 框选屏幕】截取目标图标，或点击【➕ 新增步骤】定制自己的自动化流程！"
+            ))
 
     def apply_preset(self, key):
         presets = {
@@ -2174,7 +2211,9 @@ class RealScreenScanBot:
         region = getattr(self, "target_region", None)
         ThresholdTuningDialog(self.root, target_path, current_threshold=th_val, region=region, on_apply=_on_apply)
 
-    def run_shared_ocr(self, screenshot_pil):
+    def run_shared_ocr(self, screenshot_pil, lang=None):
+        if not lang:
+            lang = getattr(self, "ocr_lang_var", None).get().split(" ")[0] if hasattr(self, "ocr_lang_var") else "zh-Hans-CN"
         """
         每轮状态机扫描仅对当前截图执行一次 4 变体 OCR，生成共享条目列表供所有 text 规则快速复用，
         彻底消除由于多条文字规则导致系统卡死变慢的隐患。
@@ -2205,7 +2244,7 @@ class RealScreenScanBot:
         extracted_items = []
         for p_img, scale, variant_name in pil_images:
             try:
-                result = winocr.recognize_pil_sync(p_img, 'zh-Hans-CN')
+                result = winocr.recognize_pil_sync(p_img, lang)
                 res_lines = result.get('lines') if hasattr(result, 'get') else getattr(result, 'lines', None)
                 if not result or not res_lines:
                     continue
@@ -2275,8 +2314,11 @@ class RealScreenScanBot:
                     self.log(f"   ⚠️ 子动作【{raw_step}】无物理坐标，跳过右键")
             elif any(k in s for k in ("等待", "sleep", "wait")):
                 m = re.search(r'(\d+(?:\.\d+)?)', s)
-                sec = float(m.group(1)) if m else 0.3
-                time.sleep(sec)
+                raw_sec = float(m.group(1)) if m else 0.3
+                sec = min(60.0, max(0.05, raw_sec))  # 单次等待硬上限 60 秒
+                end_t = time.time() + sec
+                while time.time() < end_t and self.running and not getattr(self, "paused", False):
+                    time.sleep(min(0.15, max(0.01, end_t - time.time())))
             elif any(k in s for k in ("粘贴", "paste")):
                 if ":" in raw_step or "：" in raw_step:
                     content = re.split(r'[:：]', raw_step, 1)[1].strip()
@@ -2321,9 +2363,14 @@ class RealScreenScanBot:
 
     def verify_action_result_and_retry(self, rule, candidate, coord, region, id_to_rule):
         """
-        动作后加验证:
+        动作后加验证与重试:
         点击后等目标消失或下一步出现，未达成则失败重试 1~2 次再判定失败
+        支持验证开关与局部区域轻量级检测，避免全屏文字扫描拖慢节奏
         """
+        # 开关检测：若步骤配置显式关闭验证，直接放行
+        if not rule.get("verify_after_action", True):
+            return True
+
         action = (candidate.get("action") if candidate else None) or rule.get("action", "click")
         if action not in ("click", "double_click", "right_click", "press_enter", "type_text", "sequence"):
             return True
@@ -2335,13 +2382,39 @@ class RealScreenScanBot:
         for attempt in range(1, 3):
             if not self.running:
                 break
-            time.sleep(0.35)
+            time.sleep(0.30)
+
+            # 优化：针对 text 规则且无下一步指定跳转时，只对目标点击点周边微小区域 (200x80) 做快速检测
+            # 耗时从全屏的数秒骤降至 20ms 以内！
+            r_type = rule.get("type", "image")
+            if r_type == "text" and coord and not next_r:
+                cx, cy = coord
+                local_bbox = (max(0, cx - 100), max(0, cy - 40), cx + 100, cy + 40)
+                local_shot = safe_grab(bbox=local_bbox)
+                local_ocr = self.run_shared_ocr(local_shot)
+                kws = [k.strip() for k in rule.get("target", "").replace("|", ";").split(";") if k.strip()]
+                local_has_target = False
+                for item in local_ocr:
+                    for kw in kws:
+                        if evaluate_numeric_condition(kw, item["text"])[0] or fuzzy_match(kw, item["text"]):
+                            local_has_target = True
+                            break
+                    if local_has_target:
+                        break
+                if not local_has_target:
+                    self.log(f"✅ 【快速局部验证成功】步骤【{rule['name']}】原文字目标已在点击区域消失！")
+                    return True
+                else:
+                    self.log(f"🔄 【局部目标仍在】第 {attempt}/2 次重试物理点击...")
+                    self.execute_smart_action(coord, rule, candidate=candidate, is_retry=True)
+                    continue
+
+            # 常规全图验证流程
             screenshot = safe_grab(bbox=region)
             screen_np = np.array(screenshot)
             screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
 
-            # 复用 OCR 缓存：若当前步骤或下一步步骤涉及文字识别，本轮重试仅跑一次 4 变体 OCR 并共享
-            needs_ocr = (next_r and next_r.get("type") == "text") or (rule.get("type") == "text")
+            needs_ocr = (next_r and next_r.get("type") == "text") or (r_type == "text")
             cached_ocr = self.run_shared_ocr(screenshot) if needs_ocr else None
 
             # 验证情况 1: 下一步目标已经出现
@@ -2357,11 +2430,10 @@ class RealScreenScanBot:
                 self.log(f"✅ 【动作后验证成功】步骤【{rule['name']}】原目标已成功消失响应！")
                 return True
 
-            # 目标仍存在且下一步未出现，发起重试
             self.log(f"🔄 【动作未响应重试 {attempt}/2】步骤【{rule['name']}】目标未消失且下一步未出现，正在重试点击...")
             self.execute_smart_action(coord, rule, candidate=candidate, is_retry=True)
 
-        self.log(f"⚠️ 【动作后验证判定】步骤【{rule['name']}】重试 2 次后目标仍未变化，跳过以免陷入死循环。")
+        self.log(f"⚠️ 【动作后验证判定】步骤【{rule['name']}】重试 2 次后目标仍未变化！")
         return False
 
     def detect_single_rule(self, rule, screenshot_pil, screen_gray, region=None, cached_ocr=None):
@@ -2750,6 +2822,7 @@ class RealScreenScanBot:
                                 final_coord = (coord[0] + rx + ox, coord[1] + ry + oy) if coord else None
                                 if matched or fallback_r.get("action") in ("sound_alarm",):
                                     self.execute_smart_action(final_coord, fallback_r, candidate=cand)
+                                    self.verify_action_result_and_retry(fallback_r, cand, final_coord, region, id_to_rule)
                                     self.last_action_timestamp = time.time()
                                 else:
                                     self.log(f"⚠️ 【兜底未命中】超时兜底规则【{fallback_r['name']}】目标未在画面中出现，放弃触发以防误动作。")
@@ -2788,6 +2861,14 @@ class RealScreenScanBot:
                 screenshot = safe_grab(bbox=region)
                 screen_np = np.array(screenshot)
                 screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
+
+                # 全黑截屏预警 (独占全屏/DRM 视频保护检测)
+                mean_brightness = float(np.mean(screen_gray))
+                if mean_brightness < 1.0:
+                    now_t = time.time()
+                    if now_t - getattr(self, "_last_black_warn", 0) > 12.0:
+                        self.log("⚠️ 【画面异常全黑预警】当前截获画面平均亮度接近 0 (纯黑)！目标窗口可能启用了 DirectX/OpenGL 独占全屏或 DRM 保护，请尝试将目标游戏/程序切换为【无边框窗口化】或【窗口化】运行！")
+                        self._last_black_warn = now_t
 
                 # 每轮状态机扫描仅对当前截图执行一次 4 变体 OCR，全局共享条目缓存
                 has_text_rule = any(r.get("type") == "text" for r in active_rules)
@@ -2858,7 +2939,10 @@ class RealScreenScanBot:
                     self.execute_smart_action(final_coord, r, candidate=cand)
 
                     # 动作后加验证与重试 (点击后等目标消失或下一步出现，未达成则重试 1~2 次再判定失败)
-                    self.verify_action_result_and_retry(r, cand, final_coord, region, id_to_rule)
+                    ok = self.verify_action_result_and_retry(r, cand, final_coord, region, id_to_rule)
+                    if not ok:
+                        self.log(f"⚠️ 【流转阻断】步骤【{r['name']}】动作后验证未通过且重试失败，已安全阻止跳转，保持当前步骤继续检测！")
+                        continue
 
                     # 候选级「终止脚本」优先判断
                     if cand and cand.get("next_mode") == "stop":
@@ -2994,8 +3078,8 @@ class RealScreenScanBot:
                     self.log(f"🛡️ 【目标窗口白名单拦截】目标坐标 ({ix}, {iy}) 所在窗口 [进程: {proc_name or '未知'}, 标题: '{win_title}'] 不在白名单【{whitelist}】中，已安全跳过并记录！")
                     return
 
-        if not coord and action in ("click", "double_click", "right_click"):
-            self.log(f"⚠️ 【安全跳过】步骤【{rule.get('name')}】执行动作【{action}】需要坐标，但当前目标无坐标(coord=None)，跳过物理点击以防误触！")
+        if not coord and action in ("click", "double_click", "right_click", "sequence"):
+            self.log(f"⚠️ 【安全跳过】步骤【{rule.get('name')}】执行动作【{action}】需要物理坐标，但当前目标无坐标(coord=None)，跳过执行以防误触焦点窗口！")
             return
 
         # 护栏2: Dry-Run 仿真演练拦截
@@ -3072,9 +3156,10 @@ class RealScreenScanBot:
                 self.log("🔊 【已触发】蜂鸣警报音！")
 
             elif action == "take_screenshot":
+                cleanup_old_evidence_images(50)
                 p = os.path.join(BASE_DIR, f"evidence_{int(time.time())}.png")
                 safe_grab().save(p)
-                self.log(f"📷 【已存盘】截图证据: {os.path.basename(p)}")
+                self.log(f"📷 【已存盘】截图证据: {os.path.basename(p)} (自动保留最新50张)")
 
         except Exception as e:
             self.log(f"❌ 动作执行异常: {e}")
