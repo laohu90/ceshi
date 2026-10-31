@@ -842,6 +842,15 @@ class RealScreenScanBot:
         self.target_region = None
         self.bot_interval = 0.8
         self.anti_stuck_threshold = 45.0 # 45秒防卡死看门狗
+        
+        # 🛡️ 安全护栏核心状态
+        self.dry_run = False           # 仿真演练模式 (只记录不真实点击)
+        self.paused = False            # 暂停标志 (F7 即时暂停)
+        self.action_counter = 0        # 执行动作计数器
+        self.max_actions = 0           # 最大执行次数上限 (0=不限)
+        self.bot_start_time = 0        # 启动时间戳
+        self.max_duration_seconds = 0  # 最长运行时长上限 (0=不限)
+        self.timer_records = {}        # 定时器规则的时间戳记忆
 
         self.compact_mode = False
         self.create_widgets()
@@ -983,6 +992,7 @@ class RealScreenScanBot:
 
         hotkey_box = tk.Frame(title_frame, bg="#1e293b")
         hotkey_box.pack(side=tk.RIGHT)
+        tk.Label(hotkey_box, text="[F7 暂停/恢复]", bg="#f59e0b", fg="black", font=("Microsoft YaHei UI", 8, "bold"), padx=6, pady=2).pack(side=tk.LEFT, padx=2)
         tk.Label(hotkey_box, text="[F8 启动]", bg="#10b981", fg="white", font=("Microsoft YaHei UI", 8, "bold"), padx=6, pady=2).pack(side=tk.LEFT, padx=2)
         tk.Label(hotkey_box, text="[F9 停止]", bg="#ef4444", fg="white", font=("Microsoft YaHei UI", 8, "bold"), padx=6, pady=2).pack(side=tk.LEFT, padx=2)
 
@@ -1049,7 +1059,8 @@ class RealScreenScanBot:
         tk.Button(row2, text="🔍 仅测试匹配", command=self.test_single_rule_detection, bg="#8b5cf6", fg="white", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 4))
         tk.Button(row2, text="🖱️ 真实点击测试(2s后)", command=self.test_real_click_selected_rule, bg="#0ea5e9", fg="white", font=("Microsoft YaHei UI", 8, "bold"), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 4))
         tk.Button(row2, text="🎨 屏幕吸管取色", command=self.start_color_picker, bg="#0284c7", fg="white", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 4))
-        tk.Button(row2, text="⏱️ 3秒物理点击", command=self.test_physical_click_at_cursor, bg="#475569", fg="#f8fafc", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT)
+        tk.Button(row2, text="⏱️ 3秒物理点击", command=self.test_physical_click_at_cursor, bg="#475569", fg="#f8fafc", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(row2, text="🩺 规则健康体检", command=self.run_preflight_health_check, bg="#6366f1", fg="white", font=("Microsoft YaHei UI", 8, "bold"), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT)
 
         # 5. 控制面板（全功能展示）
         ctrl_frame = tk.Frame(self.root, bg="#0f172a", padx=10, pady=4)
@@ -1069,10 +1080,21 @@ class RealScreenScanBot:
         ], state="readonly", width=26, font=("Microsoft YaHei UI", 8))
         self.arb_combo.pack(side=tk.LEFT, padx=(0, 10))
 
-        self.btn_start = tk.Button(ctrl_frame, text="▶ 启动 (F8)", command=self.start_bot, bg="#10b981", fg="white", font=("Microsoft YaHei UI", 10, "bold"), padx=14, pady=4, relief=tk.FLAT)
-        self.btn_start.pack(side=tk.LEFT, padx=(0, 6))
+        self.dry_run_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(ctrl_frame, text="🛡️ Dry-Run 试运行 (只记录不点击)", variable=self.dry_run_var, bg="#0f172a", fg="#38bdf8", selectcolor="#1e293b", font=("Microsoft YaHei UI", 8, "bold")).pack(side=tk.LEFT, padx=(0, 10))
 
-        self.btn_stop = tk.Button(ctrl_frame, text="⏹ 停止 (F9)", command=self.stop_bot, bg="#ef4444", fg="white", font=("Microsoft YaHei UI", 10, "bold"), padx=14, pady=4, relief=tk.FLAT, state=tk.DISABLED)
+        tk.Label(ctrl_frame, text="执行上限:", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
+        self.max_runs_entry = tk.Entry(ctrl_frame, width=4, bg="#1e293b", fg="#fff", insertbackground="white", font=("Microsoft YaHei UI", 8))
+        self.max_runs_entry.insert(0, "0")
+        self.max_runs_entry.pack(side=tk.LEFT, padx=(2, 10))
+
+        self.btn_start = tk.Button(ctrl_frame, text="▶ 启动 (F8)", command=self.start_bot, bg="#10b981", fg="white", font=("Microsoft YaHei UI", 10, "bold"), padx=12, pady=4, relief=tk.FLAT)
+        self.btn_start.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.btn_pause = tk.Button(ctrl_frame, text="⏸ 暂停 (F7)", command=self.toggle_pause, bg="#f59e0b", fg="black", font=("Microsoft YaHei UI", 10, "bold"), padx=10, pady=4, relief=tk.FLAT, state=tk.DISABLED)
+        self.btn_pause.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.btn_stop = tk.Button(ctrl_frame, text="⏹ 停止 (F9)", command=self.stop_bot, bg="#ef4444", fg="white", font=("Microsoft YaHei UI", 10, "bold"), padx=12, pady=4, relief=tk.FLAT, state=tk.DISABLED)
         self.btn_stop.pack(side=tk.LEFT)
 
         # 6. 日志面板
@@ -1314,26 +1336,88 @@ class RealScreenScanBot:
                 pass
             self.root.after(0, self.stop_bot)
 
+    def toggle_pause(self):
+        if not self.running:
+            return
+        self.paused = not self.paused
+        if self.paused:
+            def _ui_pause():
+                self.btn_pause.config(text="▶ 恢复 (F7)", bg="#10b981", fg="white")
+            self.root.after(0, _ui_pause)
+            self.log("⏸️ 【状态机已暂停】按 [F7] 随时恢复执行。")
+        else:
+            def _ui_resume():
+                self.btn_pause.config(text="⏸ 暂停 (F7)", bg="#f59e0b", fg="black")
+            self.root.after(0, _ui_resume)
+            self.log("▶️ 【状态机已恢复】继续监控。")
+
+    def run_preflight_health_check(self):
+        self.log("🩺 正在进行规则健康体检 (路径完整性、悬空跳转、死循环)...")
+        issues = []
+        rule_ids = {r["id"] for r in self.rules}
+        
+        for idx, r in enumerate(self.rules):
+            r_name = r.get("name", f"规则{idx+1}")
+            if r.get("type") in ("image", "image_vanish"):
+                cands = r.get("candidates") or []
+                if cands:
+                    for c in cands:
+                        p = c.get("image_path", "").strip()
+                        if p and not os.path.exists(p):
+                            issues.append(f"❌ 步骤【{r_name}】候选图路径不存在: {p}")
+                else:
+                    paths = [p.strip() for p in r.get("target", "").replace("|", ";").split(";") if p.strip()]
+                    for p in paths:
+                        if not os.path.exists(p):
+                            issues.append(f"❌ 步骤【{r_name}】目标图片不存在: {p}")
+            
+            if r.get("next_mode") == "jump":
+                tgt = r.get("next_target_id")
+                if tgt and tgt not in rule_ids:
+                    issues.append(f"⚠️ 步骤【{r_name}】跳转目标 ID 悬空 (不存在): {tgt}")
+            
+            fb = r.get("timeout_target_id")
+            if fb and fb not in rule_ids:
+                issues.append(f"⚠️ 步骤【{r_name}】超时兜底 ID 悬空 (不存在): {fb}")
+
+        if not issues:
+            self.log("✅ 【规则健康体检通过】所有图片路径真实有效，流转跳转关系完整，无悬空死链！")
+            messagebox.showinfo("自检合格", "🎉 所有规则健康体检通过！\n\n• 所有图片路径均真实有效\n• 跳转关系完整无死链\n• 准备就绪，可安全运行。")
+        else:
+            self.log(f"⚠️ 【规则体检发现 {len(issues)} 处潜在隐患】:")
+            for issue in issues[:8]:
+                self.log(f"   {issue}")
+            msg = "\n".join(issues[:6])
+            if len(issues) > 6:
+                msg += f"\n...及另外 {len(issues)-6} 处问题"
+            messagebox.showwarning("规则健康告警", f"发现以下潜在问题，建议排查：\n\n{msg}")
+
     def start_global_hotkey_listener(self):
+        self.root.bind_all("<F7>", lambda e: self.toggle_pause())
         self.root.bind_all("<F8>", lambda e: self.safe_start_bot())
         self.root.bind_all("<F9>", lambda e: self.safe_stop_bot())
 
         if KEYBOARD_AVAILABLE:
             try:
+                keyboard.add_hotkey('f7', self.toggle_pause, suppress=False)
                 keyboard.add_hotkey('f8', self.safe_start_bot, suppress=False)
                 keyboard.add_hotkey('f9', self.safe_stop_bot, suppress=False)
-                self.log("⚡ [全局热键就绪] 驱动级键盘钩子已加载！按 [F8] 启动、[F9] 停止！")
+                self.log("⚡ [全局热键就绪] 驱动级键盘钩子已加载！按 [F7] 暂停、[F8] 启动、[F9] 停止！")
                 return
             except Exception as e:
                 self.log(f"⚠️ keyboard 钩子注册提示: {e}，启用底层监听。")
 
         def _global_poller():
             user32 = ctypes.windll.user32
+            VK_F7 = 0x76
             VK_F8 = 0x77
             VK_F9 = 0x78
             while True:
                 time.sleep(0.025)
                 try:
+                    if user32.GetAsyncKeyState(VK_F7) & 0x8000:
+                        self.toggle_pause()
+                        time.sleep(0.4)
                     if user32.GetAsyncKeyState(VK_F8) & 0x8000:
                         self.safe_start_bot()
                         time.sleep(0.4)
@@ -1363,6 +1447,13 @@ class RealScreenScanBot:
             self.log_box.insert(tk.END, f"[{time.strftime('%H:%M:%S')}] {message}\n")
             self.log_box.see(tk.END)
             self.log_box.config(state=tk.DISABLED)
+            
+            # 安全留证：同步持久化落盘至 screenscan_rpa.log
+            try:
+                with open("screenscan_rpa.log", "a", encoding="utf-8") as f:
+                    f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1598,7 +1689,16 @@ class RealScreenScanBot:
                 return False, f"颜色解析失败(需为 X,Y,#HEX): {e}", None, 0.0, None
 
         elif r_type == "timer":
-            return True, "定时循环触发", None, 0.5, None
+            t_interval = float(rule.get("timer_interval", 15.0))
+            rule_id = rule.get("id", "timer_default")
+            last_t = getattr(self, "timer_records", {}).get(rule_id, 0.0)
+            now = time.time()
+            if now - last_t >= t_interval:
+                self.timer_records[rule_id] = now
+                return True, f"定时周期触发到达 (每 {t_interval}s 触发一次)", None, 0.5, None
+            else:
+                remain = round(t_interval - (now - last_t), 1)
+                return False, f"定时周期未到达 (倒计时 {remain}s)", None, 0.0, None
 
         return False, "未知识别类型", None, 0.0, None
 
@@ -1675,20 +1775,34 @@ class RealScreenScanBot:
             return
 
         self.running = True
+        self.paused = False
         self.workflow_target_id = None
         self.workflow_target_deadline = 0
         self.locked_rule_id = None
         self.lock_expire_time = 0
+        self.action_counter = 0
+        self.bot_start_time = time.time()
         self.last_action_timestamp = time.time()
         self.heartbeat = time.time()
+        
+        self.dry_run = bool(self.dry_run_var.get())
         try:
             self.bot_interval = float(self.interval_entry.get())
         except Exception:
             self.bot_interval = 0.8
+            
+        try:
+            self.max_actions = int(self.max_runs_entry.get())
+        except Exception:
+            self.max_actions = 0
 
         self.btn_start.config(state=tk.DISABLED)
+        self.btn_pause.config(state=tk.NORMAL, text="⏸ 暂停 (F7)", bg="#f59e0b", fg="black")
         self.btn_stop.config(state=tk.NORMAL)
-        self.log("🚀 [状态机已启动] 正在监控工作流... 按 [F9] 随时停止。")
+        
+        mode_str = "【🛡️ Dry-Run 仿真试运行模式 - 绝不真实点击】" if self.dry_run else "【⚡ 物理驱动模式】"
+        cap_str = f" | 执行上限: {self.max_actions} 次" if self.max_actions > 0 else ""
+        self.log(f"🚀 [状态机已启动] {mode_str}{cap_str} 正在监控工作流... 按 [F7] 暂停 / [F9] 停止。")
 
         threading.Thread(target=self.run_state_machine_loop, daemon=True).start()
 
@@ -1696,16 +1810,18 @@ class RealScreenScanBot:
         if not self.running:
             return
         self.running = False
+        self.paused = False
         self.workflow_target_id = None
         self.locked_rule_id = None
         def _ui_stop():
             try:
                 self.btn_start.config(state=tk.NORMAL)
+                self.btn_pause.config(state=tk.DISABLED, text="⏸ 暂停 (F7)")
                 self.btn_stop.config(state=tk.DISABLED)
             except Exception:
                 pass
         self.root.after(0, _ui_stop)
-        self.log("⏹ [已停止] 监控已停止。随时按 [F8] 恢复。")
+        self.log(f"⏹ [已停止] 监控已停止 (本次共触发 {self.action_counter} 次动作)。随时按 [F8] 恢复。")
 
     def run_state_machine_loop(self):
         interval = getattr(self, "bot_interval", 0.8)
@@ -1714,6 +1830,9 @@ class RealScreenScanBot:
 
         while self.running:
             self.heartbeat = time.time()
+            if self.paused:
+                time.sleep(0.25)
+                continue
             try:
                 now = time.time()
 
@@ -1942,6 +2061,30 @@ class RealScreenScanBot:
         humanize = rule.get("humanize", True)
 
         ix, iy = coord if coord else (0, 0)
+
+        # 护栏1: 排除工具自身窗口，防止点到自己的 UI 导致混乱
+        if coord:
+            try:
+                rx = self.root.winfo_rootx()
+                ry = self.root.winfo_rooty()
+                rw = self.root.winfo_width()
+                rh = self.root.winfo_height()
+                if (rx <= ix <= rx + rw) and (ry <= iy <= ry + rh):
+                    self.log(f"🛑 【安全熔断】目标坐标 ({ix}, {iy}) 位于本软件自身窗口内！已自动拦截，防止点到自己。")
+                    return
+            except Exception:
+                pass
+
+        # 护栏2: Dry-Run 仿真演练拦截
+        if getattr(self, "dry_run", False):
+            self.log(f"🛡️ 【DRY-RUN 试运行】模拟执行动作【{action}】坐标: ({ix}, {iy})，已拦截物理动作！")
+            return
+
+        # 护栏3: 执行次数计数与上限熔断
+        self.action_counter += 1
+        if self.max_actions > 0 and self.action_counter >= self.max_actions:
+            self.log(f"🏁 【达到保护上限】已完成 {self.action_counter} 次操作，触发安全保护自动停机！")
+            self.stop_bot()
 
         try:
             if action == "click" and coord:
