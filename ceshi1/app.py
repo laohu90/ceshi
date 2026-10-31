@@ -321,6 +321,62 @@ def fuzzy_match(kw, txt):
     else:
         return (common / len(kw)) >= 0.65
 
+
+# ==========================================
+# 键盘交互与快捷键字典映射 (支持组合快捷键、单键、中文字符与别名归一化)
+# ==========================================
+KEY_NORMALIZE_MAP = {
+    "ctrl": "ctrl", "control": "ctrl", "ctl": "ctrl",
+    "alt": "alt", "option": "alt",
+    "shift": "shift",
+    "win": "win", "windows": "win", "super": "win", "meta": "win", "cmd": "win",
+    "enter": "enter", "return": "enter", "回车": "enter",
+    "esc": "esc", "escape": "esc", "退出": "esc", "取消": "esc",
+    "tab": "tab", "制表": "tab",
+    "space": "space", "spacebar": "space", "空格": "space",
+    "backspace": "backspace", "退格": "backspace",
+    "delete": "delete", "del": "delete", "删除": "delete",
+    "pageup": "pageup", "pgup": "pageup",
+    "pagedown": "pagedown", "pgdn": "pagedown",
+    "home": "home", "end": "end", "insert": "insert", "ins": "insert",
+    "capslock": "capslock", "numlock": "numlock", "scrolllock": "scrolllock",
+    "up": "up", "down": "down", "left": "left", "right": "right",
+    "上": "up", "下": "down", "左": "left", "右": "right",
+    "f1": "f1", "f2": "f2", "f3": "f3", "f4": "f4", "f5": "f5", "f6": "f6",
+    "f7": "f7", "f8": "f8", "f9": "f9", "f10": "f10", "f11": "f11", "f12": "f12"
+}
+
+CHINESE_HOTKEY_MAP = {
+    "全选": ["ctrl", "a"],
+    "复制": ["ctrl", "c"],
+    "粘贴": ["ctrl", "v"],
+    "剪切": ["ctrl", "x"],
+    "保存": ["ctrl", "s"],
+    "撤销": ["ctrl", "z"],
+    "重做": ["ctrl", "y"],
+    "查找": ["ctrl", "f"],
+    "刷新": ["f5"],
+    "关闭窗口": ["alt", "f4"],
+    "桌面": ["win", "d"],
+    "显示桌面": ["win", "d"],
+    "运行": ["win", "r"],
+    "任务管理器": ["ctrl", "shift", "esc"]
+}
+
+def parse_hotkey_tokens(param):
+    p = str(param).strip()
+    if p in CHINESE_HOTKEY_MAP:
+        return CHINESE_HOTKEY_MAP[p]
+    parts = re.split(r'[\+\,\s]+', p)
+    keys = []
+    for k in parts:
+        k_clean = k.strip()
+        if not k_clean:
+            continue
+        norm = KEY_NORMALIZE_MAP.get(k_clean.lower(), k_clean.lower())
+        keys.append(norm)
+    return keys
+
 class ThresholdTuningDialog(tk.Toplevel):
     """
     阈值调参助手 + 实时命中框预览:
@@ -778,21 +834,29 @@ class RuleDialog(tk.Toplevel):
         a1 = tk.Frame(sec_act, bg="#0f172a")
         a1.pack(fill=tk.X, pady=3)
         tk.Label(a1, text="动作类型:", bg="#0f172a", fg="#cbd5e1", font=("Microsoft YaHei UI", 9, "bold"), width=11, anchor="w").pack(side=tk.LEFT)
-        self.action_var = tk.StringVar(value=self.rule["action"])
-        act_combo = ttk.Combobox(a1, textvariable=self.action_var, values=[
+        self.action_options = [
             "click (鼠标左键单击目标中心 - 真实穿透)",
-            "sequence (复合动作序列: 点击 -> 等待0.3s -> 粘贴 -> 回车)",
+            "hotkey (执行组合快捷键，如 ctrl+c, alt+f4, win+d)",
+            "press_key (按键盘单键，如 enter, esc, tab, space, f5)",
+            "type_text (输入文本内容，支持中文/英文/粘贴)",
+            "press_enter (点击目标后按 Enter 回车)",
+            "sequence (复合动作序列: 支持自由组合点击/等待/快捷键/按键/输入)",
             "double_click (鼠标左键双击)",
             "right_click (鼠标右键点击)",
             "hover (鼠标移动至目标悬停)",
             "scroll_down (向下滚动鼠标滚轮)",
             "scroll_up (向上滚动鼠标滚轮)",
-            "press_enter (点击后按 Enter 回车)",
-            "hotkey (执行组合快捷键)",
-            "type_text (点击目标并输入文本)",
             "sound_alarm (播放蜂鸣警报音)",
             "take_screenshot (自动截图留存证据)"
-        ], state="readonly", width=42, font=("Microsoft YaHei UI", 9))
+        ]
+        cur_act = self.rule.get("action", "click")
+        matched_act_str = self.action_options[0]
+        for opt in self.action_options:
+            if opt.split(" ")[0] == cur_act:
+                matched_act_str = opt
+                break
+        self.action_var = tk.StringVar(value=matched_act_str)
+        act_combo = ttk.Combobox(a1, textvariable=self.action_var, values=self.action_options, state="readonly", width=42, font=("Microsoft YaHei UI", 9))
         act_combo.pack(side=tk.LEFT, padx=(0, 10), fill=tk.X, expand=True)
         act_combo.bind("<<ComboboxSelected>>", self.on_action_change)
 
@@ -806,14 +870,52 @@ class RuleDialog(tk.Toplevel):
         self.lbl_param_hint = tk.Label(self.act_param_frame, text="", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8))
         self.lbl_param_hint.pack(side=tk.LEFT)
 
-        seq_bar = tk.Frame(sec_act, bg="#0f172a")
-        seq_bar.pack(fill=tk.X, pady=2)
-        tk.Label(seq_bar, text="复合序列快捷:", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
-        tk.Button(seq_bar, text="⚡ 典型序列: 点击 -> 等待 0.3s -> 粘贴 -> 回车", command=lambda: self.set_sequence_param("点击 -> 等待 0.3s -> 粘贴 -> 回车"), bg="#3b82f6", fg="white", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=4).pack(side=tk.LEFT, padx=2)
-        tk.Button(seq_bar, text="+点击", command=lambda: self.append_seq("点击"), bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3).pack(side=tk.LEFT, padx=1)
-        tk.Button(seq_bar, text="+等待0.3s", command=lambda: self.append_seq("等待 0.3s"), bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3).pack(side=tk.LEFT, padx=1)
-        tk.Button(seq_bar, text="+粘贴", command=lambda: self.append_seq("粘贴"), bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3).pack(side=tk.LEFT, padx=1)
-        tk.Button(seq_bar, text="+回车", command=lambda: self.append_seq("回车"), bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3).pack(side=tk.LEFT, padx=1)
+        # 键盘快捷键工具条 (点击一键填入或追加至序列)
+        self.key_preset_bar = tk.Frame(sec_act, bg="#0f172a")
+        self.key_preset_bar.pack(fill=tk.X, pady=2)
+
+        k_row1 = tk.Frame(self.key_preset_bar, bg="#0f172a")
+        k_row1.pack(fill=tk.X, pady=1)
+        tk.Label(k_row1, text="⌨️ 快捷组合:", bg="#0f172a", fg="#38bdf8", font=("Microsoft YaHei UI", 8, "bold"), width=11, anchor="w").pack(side=tk.LEFT)
+        for label, val in [
+            ("Ctrl+C (复制)", "ctrl+c"),
+            ("Ctrl+V (粘贴)", "ctrl+v"),
+            ("Ctrl+A (全选)", "ctrl+a"),
+            ("Ctrl+S (保存)", "ctrl+s"),
+            ("Alt+F4 (关闭)", "alt+f4"),
+            ("Win+D (桌面)", "win+d"),
+            ("Win+R (运行)", "win+r"),
+            ("Ctrl+Shift+Esc", "ctrl+shift+esc")
+        ]:
+            tk.Button(k_row1, text=label, command=lambda v=val: self.apply_quick_key(v), bg="#1e293b", fg="#cbd5e1", activebackground="#38bdf8", activeforeground="#000", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3, pady=1).pack(side=tk.LEFT, padx=1)
+
+        k_row2 = tk.Frame(self.key_preset_bar, bg="#0f172a")
+        k_row2.pack(fill=tk.X, pady=1)
+        tk.Label(k_row2, text="⌨️ 常用按键:", bg="#0f172a", fg="#10b981", font=("Microsoft YaHei UI", 8, "bold"), width=11, anchor="w").pack(side=tk.LEFT)
+        for label, val in [
+            ("Enter 回车", "enter"),
+            ("Esc 退出", "esc"),
+            ("Tab 制表", "tab"),
+            ("Space 空格", "space"),
+            ("Backspace 退格", "backspace"),
+            ("Delete 删除", "delete"),
+            ("F5 刷新", "f5"),
+            ("↑ 上", "up"),
+            ("↓ 下", "down")
+        ]:
+            tk.Button(k_row2, text=label, command=lambda v=val: self.apply_quick_key(v), bg="#1e293b", fg="#cbd5e1", activebackground="#10b981", activeforeground="#000", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3, pady=1).pack(side=tk.LEFT, padx=1)
+
+        # 复合动作序列搭建工具条
+        self.seq_bar = tk.Frame(sec_act, bg="#0f172a")
+        self.seq_bar.pack(fill=tk.X, pady=2)
+        tk.Label(self.seq_bar, text="⚡ 序列搭建:", bg="#0f172a", fg="#fbbf24", font=("Microsoft YaHei UI", 8, "bold"), width=11, anchor="w").pack(side=tk.LEFT)
+        tk.Button(self.seq_bar, text="⚡ 典型: 点击 -> 等待0.3s -> 粘贴 -> 回车", command=lambda: self.set_sequence_param("点击 -> 等待 0.3s -> 粘贴 -> 回车"), bg="#2563eb", fg="white", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=4).pack(side=tk.LEFT, padx=2)
+        tk.Button(self.seq_bar, text="+点击", command=lambda: self.append_seq("点击"), bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3).pack(side=tk.LEFT, padx=1)
+        tk.Button(self.seq_bar, text="+等待0.3s", command=lambda: self.append_seq("等待 0.3s"), bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3).pack(side=tk.LEFT, padx=1)
+        tk.Button(self.seq_bar, text="+输入文本", command=lambda: self.append_seq("输入: 内容"), bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3).pack(side=tk.LEFT, padx=1)
+        tk.Button(self.seq_bar, text="+粘贴", command=lambda: self.append_seq("粘贴"), bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3).pack(side=tk.LEFT, padx=1)
+        tk.Button(self.seq_bar, text="+回车", command=lambda: self.append_seq("回车"), bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3).pack(side=tk.LEFT, padx=1)
+        tk.Button(self.seq_bar, text="🧹 清空", command=self.clear_param, bg="#ef4444", fg="#ffffff", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3).pack(side=tk.LEFT, padx=2)
 
         a_win = tk.Frame(sec_act, bg="#0f172a")
         a_win.pack(fill=tk.X, pady=3)
@@ -1017,9 +1119,29 @@ class RuleDialog(tk.Toplevel):
 
             tk.Label(row_bottom, text="🎯 命中动作:", bg="#1e293b", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
             c_act = cand.get("action", self.rule.get("action", "click"))
-            act_map = {"click": "click (物理单击)", "double_click": "double_click (双击)", "right_click": "right_click (右键)", "hover": "hover (悬停)", "press_enter": "press_enter (回车)", "sound_alarm": "sound_alarm (警报)"}
-            
-            act_sp = ttk.Combobox(row_bottom, values=["click (物理单击)", "double_click (双击)", "right_click (右键)", "hover (悬停)", "press_enter (回车)", "sound_alarm (警报)"], state="readonly", width=14, font=("Microsoft YaHei UI", 8))
+            act_map = {
+                "click": "click (物理单击)",
+                "hotkey": "hotkey (快捷键)",
+                "press_key": "press_key (按单键)",
+                "type_text": "type_text (输入文本)",
+                "press_enter": "press_enter (回车)",
+                "double_click": "double_click (双击)",
+                "right_click": "right_click (右键)",
+                "hover": "hover (悬停)",
+                "sound_alarm": "sound_alarm (警报)"
+            }
+            cand_act_vals = [
+                "click (物理单击)",
+                "hotkey (快捷键)",
+                "press_key (按单键)",
+                "type_text (输入文本)",
+                "press_enter (回车)",
+                "double_click (双击)",
+                "right_click (右键)",
+                "hover (悬停)",
+                "sound_alarm (警报)"
+            ]
+            act_sp = ttk.Combobox(row_bottom, values=cand_act_vals, state="readonly", width=14, font=("Microsoft YaHei UI", 8))
             act_sp.set(act_map.get(c_act, "click (物理单击)"))
             act_sp.pack(side=tk.LEFT, padx=(2, 8))
             act_sp.bind("<<ComboboxSelected>>", lambda e, idx=orig_idx, combo=act_sp: self.update_cand_action(idx, combo.get()))
@@ -1120,15 +1242,54 @@ class RuleDialog(tk.Toplevel):
                 })
             self.render_candidates_ui()
 
+    def apply_quick_key(self, key_str):
+        act_raw = self.action_var.get().split(" ")[0]
+        if act_raw == "sequence":
+            step = f"hotkey:{key_str}" if "+" in key_str else f"按键:{key_str}"
+            self.append_seq(step)
+        elif act_raw in ("hotkey", "press_key"):
+            if "+" in key_str and act_raw == "press_key":
+                for opt in self.action_options:
+                    if opt.startswith("hotkey"):
+                        self.action_var.set(opt)
+                        break
+                self.on_action_change()
+            elif "+" not in key_str and act_raw == "hotkey":
+                for opt in self.action_options:
+                    if opt.startswith("press_key"):
+                        self.action_var.set(opt)
+                        break
+                self.on_action_change()
+            self.act_param_entry.delete(0, tk.END)
+            self.act_param_entry.insert(0, key_str)
+        else:
+            target_act = "hotkey" if "+" in key_str else "press_key"
+            for opt in self.action_options:
+                if opt.startswith(target_act):
+                    self.action_var.set(opt)
+                    break
+            self.on_action_change()
+            self.act_param_entry.delete(0, tk.END)
+            self.act_param_entry.insert(0, key_str)
+
+    def clear_param(self):
+        self.act_param_entry.delete(0, tk.END)
+
     def set_sequence_param(self, s):
-        self.action_var.set("sequence (复合动作序列: 点击 -> 等待0.3s -> 粘贴 -> 回车)")
+        for opt in self.action_options:
+            if opt.startswith("sequence"):
+                self.action_var.set(opt)
+                break
         self.on_action_change()
         self.act_param_entry.delete(0, tk.END)
         self.act_param_entry.insert(0, s)
 
     def append_seq(self, step):
         if not self.action_var.get().startswith("sequence"):
-            self.action_var.set("sequence (复合动作序列: 点击 -> 等待0.3s -> 粘贴 -> 回车)")
+            for opt in self.action_options:
+                if opt.startswith("sequence"):
+                    self.action_var.set(opt)
+                    break
             self.on_action_change()
         cur = self.act_param_entry.get().strip()
         if cur:
@@ -1207,18 +1368,38 @@ class RuleDialog(tk.Toplevel):
         act = act_raw.split(" ")[0]
         if act == "hotkey":
             self.lbl_act_param.config(text="组合快捷键:")
-            self.lbl_param_hint.config(text="如: ctrl+c, alt+f4")
+            self.lbl_param_hint.config(text="支持: ctrl+c, alt+f4, win+d, ctrl+shift+esc 等 (可点击下方一键输入)")
             self.act_param_frame.pack(fill=tk.X, pady=3)
+            self.key_preset_bar.pack(fill=tk.X, pady=2)
+            self.seq_bar.pack_forget()
+        elif act == "press_key":
+            self.lbl_act_param.config(text="键盘单键:")
+            self.lbl_param_hint.config(text="支持: enter, esc, tab, space, backspace, f5, up, down (可点击下方一键输入)")
+            self.act_param_frame.pack(fill=tk.X, pady=3)
+            self.key_preset_bar.pack(fill=tk.X, pady=2)
+            self.seq_bar.pack_forget()
         elif act == "type_text":
             self.lbl_act_param.config(text="输入文本内容:")
-            self.lbl_param_hint.config(text="输入自动打出的字符串")
+            self.lbl_param_hint.config(text="支持输入任意中文、英文、数字与符号 (中文将自动走剪贴板原生粘贴)")
             self.act_param_frame.pack(fill=tk.X, pady=3)
+            self.key_preset_bar.pack_forget()
+            self.seq_bar.pack_forget()
+        elif act == "sequence":
+            self.lbl_act_param.config(text="复合动作序列:")
+            self.lbl_param_hint.config(text="以 -> 分隔，自由组合鼠标点击、等待、输入、组合快捷键")
+            self.act_param_frame.pack(fill=tk.X, pady=3)
+            self.key_preset_bar.pack(fill=tk.X, pady=2)
+            self.seq_bar.pack(fill=tk.X, pady=2)
         elif "scroll" in act:
             self.lbl_act_param.config(text="滚动行数幅度:")
             self.lbl_param_hint.config(text="如: 300")
             self.act_param_frame.pack(fill=tk.X, pady=3)
+            self.key_preset_bar.pack_forget()
+            self.seq_bar.pack_forget()
         else:
             self.act_param_frame.pack_forget()
+            self.key_preset_bar.pack_forget()
+            self.seq_bar.pack_forget()
 
     def browse_image(self):
         paths = filedialog.askopenfilenames(title="选择多张候选图片", filetypes=[("图片", "*.png *.jpg *.jpeg *.bmp")])
@@ -2289,9 +2470,64 @@ class RealScreenScanBot:
 
         return extracted_items
 
+    def trigger_hotkey(self, param):
+        """执行组合快捷键，支持中文字名映射与别名归一化 (如 ctrl+c, alt+f4, win+d)"""
+        keys = parse_hotkey_tokens(param)
+        if not keys:
+            self.log(f"⚠️ 快捷键参数为空或无法识别: '{param}'")
+            return
+        try:
+            pyautogui.hotkey(*keys)
+            self.log(f"⌨️ 【已执行快捷键组合】: {' + '.join(keys)}")
+        except Exception as e:
+            self.log(f"⚠️ 快捷键执行异常 ({e})，尝试逐个按下并释放...")
+            try:
+                for k in keys:
+                    pyautogui.keyDown(k)
+                    time.sleep(0.02)
+                for k in reversed(keys):
+                    pyautogui.keyUp(k)
+                    time.sleep(0.02)
+                self.log(f"⌨️ 【降级执行快捷键成功】: {' + '.join(keys)}")
+            except Exception as e2:
+                self.log(f"❌ 快捷键执行失败: {e2}")
+
+    def trigger_press_key(self, param):
+        """执行键盘单键，支持 enter, esc, tab, space, backspace, f1-f12 等"""
+        key_name = str(param).strip()
+        if key_name in CHINESE_HOTKEY_MAP:
+            self.trigger_hotkey(key_name)
+            return
+        norm_key = KEY_NORMALIZE_MAP.get(key_name.lower(), key_name.lower())
+        try:
+            pyautogui.press(norm_key)
+            self.log(f"⌨️ 【已执行键盘按键】: {norm_key}")
+        except Exception as e:
+            self.log(f"❌ 按键【{norm_key}】执行失败: {e}")
+
+    def type_or_paste_text(self, text):
+        """输入文本，遇到非 ASCII 字符（如中文汉字）自动走安全剪贴板粘贴，杜绝乱码与异常"""
+        text_str = str(text)
+        has_unicode = any(ord(c) > 127 for c in text_str)
+        if has_unicode:
+            set_clipboard_text(text_str)
+            time.sleep(0.05)
+            pyautogui.hotkey('ctrl', 'v')
+            self.log(f"⌨️ 【已安全粘贴文本(含中文/特殊字符)】: '{text_str}'")
+        else:
+            try:
+                pyautogui.write(text_str, interval=0.02)
+                self.log(f"⌨️ 【已执行文本模拟打字】: '{text_str}'")
+            except Exception:
+                set_clipboard_text(text_str)
+                time.sleep(0.05)
+                pyautogui.hotkey('ctrl', 'v')
+                self.log(f"⌨️ 【已转为剪贴板粘贴输入】: '{text_str}'")
+
     def parse_and_execute_composite_action(self, coord, param_str, rule, candidate=None):
         """
         复合动作序列执行引擎: 支持一条规则内配置'点击 -> 等待 0.3s -> 粘贴 -> 回车'等复合动作链
+        全面支持键盘交互、组合快捷键(如 ctrl+c, alt+f4, win+d)、单键(enter, esc, tab, space, f5)、中英文字符输入
         """
         humanize = rule.get("humanize", True)
         ix, iy = coord if coord else (0, 0)
@@ -2303,10 +2539,12 @@ class RealScreenScanBot:
         for idx, raw_step in enumerate(steps):
             if not self.running:
                 break
-            s = raw_step.lower()
+            step_clean = raw_step.strip()
+            s = step_clean.lower()
             self.log(f"   [动作序列 {idx+1}/{len(steps)}] {raw_step}")
 
-            if any(k in s for k in ("点击", "click", "单击")):
+            # 1. 鼠标点击动作
+            if any(k in s for k in ("点击", "click", "单击")) and not any(k in s for k in ("双击", "右键", "右击")):
                 if coord:
                     self.hardware_click(ix, iy, button="left", humanize=humanize)
                 else:
@@ -2323,6 +2561,13 @@ class RealScreenScanBot:
                     self.hardware_click(ix, iy, button="right", humanize=humanize)
                 else:
                     self.log(f"   ⚠️ 子动作【{raw_step}】无物理坐标，跳过右键")
+            elif any(k in s for k in ("悬停", "hover")):
+                if coord:
+                    pyautogui.moveTo(ix, iy, duration=0.2)
+                else:
+                    self.log(f"   ⚠️ 子动作【{raw_step}】无物理坐标，跳过悬停")
+
+            # 2. 等待与延时
             elif any(k in s for k in ("等待", "sleep", "wait")):
                 m = re.search(r'(\d+(?:\.\d+)?)', s)
                 raw_sec = float(m.group(1)) if m else 0.3
@@ -2330,28 +2575,63 @@ class RealScreenScanBot:
                 end_t = time.time() + sec
                 while time.time() < end_t and self.running and not getattr(self, "paused", False):
                     time.sleep(min(0.15, max(0.01, end_t - time.time())))
-            elif any(k in s for k in ("粘贴", "paste")):
-                if ":" in raw_step or "：" in raw_step:
-                    content = re.split(r'[:：]', raw_step, 1)[1].strip()
-                    if content:
-                        set_clipboard_text(content)
-                        time.sleep(0.05)
-                pyautogui.hotkey('ctrl', 'v')
-            elif any(k in s for k in ("回车", "enter", "press_enter")):
-                pyautogui.press('enter')
-            elif any(k in s for k in ("输入", "type")):
+
+            # 3. 文本输入 (支持中文字符与自动剪贴板输入)
+            elif any(k in s for k in ("输入", "type:")) or s.startswith("type "):
                 content = ""
-                if ":" in raw_step or "：" in raw_step:
-                    content = re.split(r'[:：]', raw_step, 1)[1].strip()
+                if ":" in step_clean or "：" in step_clean:
+                    content = re.split(r'[:：]', step_clean, 1)[1].strip()
+                elif " " in step_clean:
+                    content = step_clean.split(" ", 1)[1].strip()
                 if content:
-                    pyautogui.write(content, interval=0.03)
-            elif any(k in s for k in ("快捷键", "hotkey")):
-                keys_str = ""
-                if ":" in raw_step or "：" in raw_step:
-                    keys_str = re.split(r'[:：]', raw_step, 1)[1].strip()
-                keys = [k.strip().lower() for k in keys_str.split("+") if k.strip()]
-                if keys:
-                    pyautogui.hotkey(*keys)
+                    self.type_or_paste_text(content)
+
+            # 4. 剪贴板粘贴
+            elif any(k in s for k in ("粘贴", "paste")):
+                if ":" in step_clean or "：" in step_clean:
+                    content = re.split(r'[:：]', step_clean, 1)[1].strip()
+                    if content:
+                        self.type_or_paste_text(content)
+                else:
+                    pyautogui.hotkey('ctrl', 'v')
+
+            # 5. 中文常见快捷动作 (全选、复制、保存、撤销等)
+            elif step_clean in CHINESE_HOTKEY_MAP:
+                keys = CHINESE_HOTKEY_MAP[step_clean]
+                self.trigger_hotkey("+".join(keys))
+
+            # 6. 快捷键组合 (显式 hotkey: / 快捷键: 或包含 + 号如 ctrl+c, alt+f4)
+            elif any(k in s for k in ("快捷键", "hotkey")) or "+" in step_clean:
+                keys_str = step_clean
+                if ":" in step_clean or "：" in step_clean:
+                    keys_str = re.split(r'[:：]', step_clean, 1)[1].strip()
+                self.trigger_hotkey(keys_str)
+
+            # 7. 键盘单键 (按键:xxx / 回车 / 退格 / 空格 / Tab / Esc / F1-F12 等)
+            elif any(k in s for k in ("按键", "press:")) or s.startswith("press "):
+                kname = step_clean
+                if ":" in step_clean or "：" in step_clean:
+                    kname = re.split(r'[:：]', step_clean, 1)[1].strip()
+                elif " " in step_clean:
+                    kname = step_clean.split(" ", 1)[1].strip()
+                self.trigger_press_key(kname)
+
+            elif any(k in s for k in ("回车", "enter", "press_enter")):
+                self.trigger_press_key("enter")
+            elif any(k in s for k in ("退格", "backspace")):
+                self.trigger_press_key("backspace")
+            elif any(k in s for k in ("空格", "space")):
+                self.trigger_press_key("space")
+            elif any(k in s for k in ("tab", "制表")):
+                self.trigger_press_key("tab")
+            elif any(k in s for k in ("esc", "退出", "取消")):
+                self.trigger_press_key("esc")
+            elif any(k in s for k in ("删除", "delete")) and not any(k in s for k in ("文件", "规则")):
+                self.trigger_press_key("delete")
+            elif s in KEY_NORMALIZE_MAP:
+                self.trigger_press_key(s)
+
+            # 8. 滚轮与工具
             elif any(k in s for k in ("滚轮下", "scroll_down")):
                 m = re.search(r'(\d+)', s)
                 amt = int(m.group(1)) if m else 3
@@ -2383,7 +2663,7 @@ class RealScreenScanBot:
             return True
 
         action = (candidate.get("action") if candidate else None) or rule.get("action", "click")
-        if action not in ("click", "double_click", "right_click", "press_enter", "type_text", "sequence"):
+        if action not in ("click", "double_click", "right_click", "press_enter", "type_text", "sequence", "hotkey", "press_key"):
             return True
 
         cand_jump = candidate.get("next_target_id") if candidate else None
@@ -3095,7 +3375,13 @@ class RealScreenScanBot:
                     self.log(f"🛡️ 【目标窗口白名单拦截】目标坐标 ({ix}, {iy}) 所在窗口 [进程: {proc_name or '未知'}, 标题: '{win_title}'] 不在白名单【{whitelist}】中，已安全跳过并记录！")
                     return
 
-        if not coord and action in ("click", "double_click", "right_click", "sequence"):
+        if not coord and action in ("click", "double_click", "right_click"):
+            self.log(f"⚠️ 【安全跳过】步骤【{rule.get('name')}】执行动作【{action}】需要物理坐标，但当前目标无坐标(coord=None)，跳过执行以防误触焦点窗口！")
+            return
+
+        if not coord and action == "sequence" and any(k in str(param).lower() for k in ("点击", "click", "双击", "右键")):
+            self.log(f"⚠️ 【安全跳过】步骤【{rule.get('name')}】复合序列包含鼠标点击动作，但当前目标无坐标(coord=None)，跳过整链执行以防误触！")
+            return
             self.log(f"⚠️ 【安全跳过】步骤【{rule.get('name')}】执行动作【{action}】需要物理坐标，但当前目标无坐标(coord=None)，跳过执行以防误触焦点窗口！")
             return
 
@@ -3148,21 +3434,26 @@ class RealScreenScanBot:
             elif action == "press_enter":
                 if coord:
                     self.hardware_click(ix, iy, humanize=humanize)
-                    time.sleep(0.1)
-                pyautogui.press('enter')
-                self.log("⌨️ 【已执行】按下 Enter 回车键")
+                    time.sleep(0.12)
+                self.trigger_press_key("enter")
 
             elif action == "hotkey" and param:
-                keys = [k.strip().lower() for k in param.split("+")]
-                pyautogui.hotkey(*keys)
-                self.log(f"⌨️ 【已执行】触发快捷键: {' + '.join(keys)}")
+                if coord:
+                    self.hardware_click(ix, iy, humanize=humanize)
+                    time.sleep(0.12)
+                self.trigger_hotkey(param)
+
+            elif action == "press_key" and param:
+                if coord:
+                    self.hardware_click(ix, iy, humanize=humanize)
+                    time.sleep(0.12)
+                self.trigger_press_key(param)
 
             elif action == "type_text" and param:
                 if coord:
                     self.hardware_click(ix, iy, humanize=humanize)
-                    time.sleep(0.1)
-                pyautogui.write(param)
-                self.log(f"⌨️ 【已执行】模拟输入: '{param}'")
+                    time.sleep(0.12)
+                self.type_or_paste_text(param)
 
             elif action == "sound_alarm":
                 try:
