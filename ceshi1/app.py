@@ -623,7 +623,7 @@ class RuleDialog(tk.Toplevel):
             "timeout_target_id": "",
             "next_timeout": 20.0,
             "humanize": True,
-            "match_index": 0,
+            "match_index": 1,
             "window_whitelist": "",
             "candidates": []
         }
@@ -725,14 +725,25 @@ class RuleDialog(tk.Toplevel):
         r_match_idx = tk.Frame(sec_base, bg="#0f172a")
         r_match_idx.pack(fill=tk.X, pady=3)
         tk.Label(r_match_idx, text="命中唯一性:", bg="#0f172a", fg="#cbd5e1", font=("Microsoft YaHei UI", 9, "bold"), width=11, anchor="w").pack(side=tk.LEFT)
-        self.match_idx_var = tk.StringVar(value=str(self.rule.get("match_index", 0)))
-        match_combo = ttk.Combobox(r_match_idx, textvariable=self.match_idx_var, values=[
+        raw_m = self.rule.get("match_index", 1)
+        try:
+            cur_m_idx = int(raw_m)
+        except Exception:
+            cur_m_idx = 1
+        match_options = [
             "0 (严格唯一: 同屏多个相同目标时告警不执行)",
             "1 (同屏多个时: 取第 1 个 - 自然从上到下从左到右)",
             "2 (同屏多个时: 取第 2 个)",
             "3 (同屏多个时: 取第 3 个)",
             "4 (同屏多个时: 取第 4 个)"
-        ], state="readonly", width=42, font=("Microsoft YaHei UI", 9))
+        ]
+        default_label = match_options[1]
+        for opt in match_options:
+            if opt.startswith(f"{cur_m_idx} "):
+                default_label = opt
+                break
+        self.match_idx_var = tk.StringVar(value=default_label)
+        match_combo = ttk.Combobox(r_match_idx, textvariable=self.match_idx_var, values=match_options, state="readonly", width=42, font=("Microsoft YaHei UI", 9))
         match_combo.pack(side=tk.LEFT, padx=(0, 6))
 
         r_prio = tk.Frame(sec_base, bg="#0f172a")
@@ -1281,11 +1292,11 @@ class RuleDialog(tk.Toplevel):
         target_rule_id = self.target_id_map.get(self.jump_combo_var.get(), "")
         timeout_target_id = self.timeout_id_map.get(self.timeout_combo_var.get(), "")
 
-        m_idx_str = self.match_idx_var.get().split(" ")[0]
+        m_idx_raw = self.match_idx_var.get().strip().split(" ")[0]
         try:
-            m_idx = int(m_idx_str)
+            m_idx = int(m_idx_raw)
         except Exception:
-            m_idx = 0
+            m_idx = 1
 
         self.rule.update({
             "name": name,
@@ -2452,7 +2463,7 @@ class RealScreenScanBot:
                         continue
                     paths = [p.strip() for p in p_raw.replace("|", ";").split(";") if p.strip()]
                     c_conf = float(c.get("confidence", rule.get("confidence", 0.70)))
-                    c_match_idx = c.get("match_index", rule.get("match_index", 0))
+                    c_match_idx = c.get("match_index", rule.get("match_index", 1))
                     c_matched = False
                     c_best_score = 0.0
                     c_best_coord = None
@@ -2492,7 +2503,7 @@ class RealScreenScanBot:
 
             best_score = 0.0
             best_res = (False, f"候选图片未命中(共{len(paths)}张)", None, 0.0, None)
-            r_match_idx = rule.get("match_index", 0)
+            r_match_idx = rule.get("match_index", 1)
             for p in paths:
                 matched, info, coord, sc = self._match_template(p, screen_gray, float(rule.get("confidence", 0.70)), match_index=r_match_idx)
                 if matched and sc > best_score:
@@ -2507,7 +2518,7 @@ class RealScreenScanBot:
                 return False, "未填写目标图片路径", None, 0.0, None
             any_exists = False
             last_info = ""
-            r_match_idx = rule.get("match_index", 0)
+            r_match_idx = rule.get("match_index", 1)
             for p in paths:
                 matched, info, coord, sc = self._match_template(p, screen_gray, float(rule.get("confidence", 0.70)), match_index=r_match_idx)
                 if matched:
@@ -2608,7 +2619,7 @@ class RealScreenScanBot:
 
         return False, "未知识别类型", None, 0.0, None
 
-    def _match_template(self, target_path, screen_gray, threshold, match_index=0):
+    def _match_template(self, target_path, screen_gray, threshold, match_index=1):
         try:
             if not hasattr(self, 'template_cache'):
                 self.template_cache = {}
@@ -2679,32 +2690,38 @@ class RealScreenScanBot:
             pts_with_sc.sort(key=lambda item: -item[2])
 
             distinct_matches = []
-            cluster_dist = max(12, min(best_w, best_h) // 2)
+            cluster_w = max(12, int(best_w * 0.6))
+            cluster_h = max(12, int(best_h * 0.6))
             for x, y, sc in pts_with_sc:
-                if not any(abs(x - mx) < cluster_dist and abs(y - my) < cluster_dist for mx, my, _ in distinct_matches):
+                if not any(abs(x - mx) < cluster_w and abs(y - my) < cluster_h for mx, my, _ in distinct_matches):
                     distinct_matches.append((x, y, sc))
 
-            # 按照从上到下、从左到右排序
-            distinct_matches.sort(key=lambda m: (m[1] // cluster_dist, m[0]))
+            # 按照从上到下、从左到右自然顺序排序
+            distinct_matches.sort(key=lambda m: (m[1] // cluster_h, m[0]))
 
-            m_idx = int(match_index or 0)
-            if len(distinct_matches) == 1:
+            m_idx = 1
+            if match_index is not None and str(match_index).strip() != "":
+                try:
+                    m_idx = int(str(match_index).split()[0])
+                except Exception:
+                    m_idx = 1
+
+            if len(distinct_matches) == 0:
+                return False, f"最高相似度 {best_pct}% (阈值需达到 {th_pct}%)", None, float(max(0.0, best_val))
+            elif len(distinct_matches) == 1:
                 cx = distinct_matches[0][0] + best_w // 2
                 cy = distinct_matches[0][1] + best_h // 2
-                return True, f"唯一匹配达到 {best_pct}% (>= 阈值 {th_pct}%)", (cx, cy), float(best_val)
-            elif len(distinct_matches) > 1:
-                if m_idx > 0:
-                    if m_idx <= len(distinct_matches):
-                        pick = distinct_matches[m_idx - 1]
-                        cx = pick[0] + best_w // 2
-                        cy = pick[1] + best_h // 2
-                        return True, f"命中 {len(distinct_matches)} 个相同目标，已按配置选取第 {m_idx} 个 (得分: {round(pick[2]*100, 1)}%)", (cx, cy), float(pick[2])
-                    else:
-                        return False, f"⚠️ 配置选取第 {m_idx} 个，但同屏仅命中 {len(distinct_matches)} 个目标", None, float(best_val)
-                else:
-                    return False, f"⚠️ 模板命中不唯一！同屏检测到 {len(distinct_matches)} 个相同图标 (最高得分 {best_pct}%)，请配置【取第 N 个】或缩小 ROI！", None, float(best_val)
+                return True, f"匹配达到 {best_pct}% (>= 阈值 {th_pct}%)", (cx, cy), float(best_val)
             else:
-                return False, f"最高相似度 {best_pct}% (阈值需达到 {th_pct}%)", None, float(max(0.0, best_val))
+                if m_idx == 0:
+                    return False, f"⚠️ 模板命中不唯一！同屏检测到 {len(distinct_matches)} 个相同目标 (最高得分 {best_pct}%)，请在规则中配置【取第 N 个】或缩小 ROI！", None, float(best_val)
+                elif m_idx <= len(distinct_matches):
+                    pick = distinct_matches[m_idx - 1]
+                    cx = pick[0] + best_w // 2
+                    cy = pick[1] + best_h // 2
+                    return True, f"命中 {len(distinct_matches)} 处相同目标，已按配置选取第 {m_idx} 个 (得分: {round(pick[2]*100, 1)}%)", (cx, cy), float(pick[2])
+                else:
+                    return False, f"⚠️ 配置选取第 {m_idx} 个，但同屏仅检测到 {len(distinct_matches)} 处目标", None, float(best_val)
 
         except Exception as e:
             return False, f"模板匹配异常: {e}", None, 0.0
