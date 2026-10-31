@@ -58,4 +58,4 @@ python ceshi1/app.py
 ## 📋 配置文件说明
 - `rpa_rules.json`: 工作流步骤与规则配置列表。
 - `rpa_settings.json`: ROI 区域持久化配置文件。
-- `rpa_run.log`: 自动轮转日志文件（单个上限 5MB）。
+- `screenscan_rpa.log`: 自动轮转日志文件（单个上限 5MB）。

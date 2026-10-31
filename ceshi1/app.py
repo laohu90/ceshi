@@ -113,16 +113,386 @@ def activate_target_window(x, y):
     except Exception:
         return None
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def safe_grab(bbox=None):
+    """跨平台安全截图，Windows下全屏及多显示器捕获"""
+    try:
+        return ImageGrab.grab(bbox=bbox, all_screens=True)
+    except Exception:
+        return ImageGrab.grab(bbox=bbox)
+
+def get_virtual_screen_geometry():
+    """获取所有显示器组成的虚拟桌面总边界 (vx, vy, vw, vh)"""
+    if sys.platform == "win32":
+        try:
+            user32 = ctypes.windll.user32
+            vx = user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
+            vy = user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
+            vw = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+            vh = user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
+            if vw > 0 and vh > 0:
+                return vx, vy, vw, vh
+        except Exception:
+            pass
+    return 0, 0, 1920, 1080
+
+def get_window_info_at(x, y):
+    """
+    使用 WindowFromPoint 获取目标屏幕物理坐标处的窗口句柄、顶级窗口标题与进程名称
+    """
+    if sys.platform != "win32":
+        return None, "", ""
+    try:
+        user32 = ctypes.windll.user32
+        pt = POINT(int(x), int(y))
+        hwnd = user32.WindowFromPoint(pt)
+        if not hwnd:
+            return None, "", ""
+        root_hwnd = user32.GetAncestor(hwnd, 2)  # GA_ROOT = 2
+        target_hwnd = root_hwnd if root_hwnd else hwnd
+        
+        # 获取窗口标题
+        length = user32.GetWindowTextLengthW(target_hwnd)
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(target_hwnd, buf, length + 1)
+        title = buf.value
+
+        # 获取进程名
+        proc_name = ""
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(target_hwnd, ctypes.byref(pid))
+        if pid.value:
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            h_proc = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+            if h_proc:
+                name_buf = ctypes.create_unicode_buffer(1024)
+                size = ctypes.c_ulong(1024)
+                if ctypes.windll.kernel32.QueryFullProcessImageNameW(h_proc, 0, name_buf, ctypes.byref(size)):
+                    proc_name = os.path.basename(name_buf.value)
+                ctypes.windll.kernel32.CloseHandle(h_proc)
+        return target_hwnd, title, proc_name
+    except Exception:
+        return None, "", ""
+
+def parse_numeric_condition(cond_str):
+    """
+    解析数值条件: 支持大于、小于、区间等判断
+    例如:
+      '>= 100'
+      '库存 < 5'
+      '价格 [10, 50]'
+      '10..50'
+    """
+    cond = cond_str.strip()
+    m_range = re.search(r'(.*?)(?:\[|【)?\s*(-?\d+(?:\.\d+)?)\s*(?:\.\.|~|至|-)\s*(-?\d+(?:\.\d+)?)\s*(?:\]|】)?$', cond)
+    if m_range:
+        label = m_range.group(1).strip().rstrip(":：")
+        v1 = float(m_range.group(2))
+        v2 = float(m_range.group(3))
+        return True, label, "range", min(v1, v2), max(v1, v2)
+
+    m_cmp = re.search(r'(.*?)(>=|<=|!=|==|>|<|=)\s*(-?\d+(?:\.\d+)?)\s*%?$', cond)
+    if m_cmp:
+        label = m_cmp.group(1).strip().rstrip(":：")
+        op = m_cmp.group(2)
+        if op == "=":
+            op = "=="
+        v = float(m_cmp.group(3))
+        return True, label, op, v, None
+
+    return False, "", "", None, None
+
+def evaluate_numeric_condition(cond_str, text):
+    """
+    检验 OCR 识别文本 text 是否满足 cond_str 数值判断
+    """
+    is_cond, label, op, v1, v2 = parse_numeric_condition(cond_str)
+    if not is_cond:
+        return False, None, ""
+
+    if label and label.lower() not in text.lower():
+        return False, None, ""
+
+    numbers = [float(n) for n in re.findall(r'-?\d+(?:\.\d+)?', text)]
+    if not numbers:
+        return False, None, ""
+
+    for num in numbers:
+        matched = False
+        if op == ">":
+            matched = num > v1
+        elif op == ">=":
+            matched = num >= v1
+        elif op == "<":
+            matched = num < v1
+        elif op == "<=":
+            matched = num <= v1
+        elif op == "==":
+            matched = abs(num - v1) < 1e-5
+        elif op == "!=":
+            matched = abs(num - v1) >= 1e-5
+        elif op == "range":
+            matched = v1 <= num <= v2
+
+        if matched:
+            op_desc = f"在区间 [{v1}, {v2}] 内" if op == "range" else f"{op} {v1}"
+            return True, num, f"数值 {num} 满足条件 '{cond_str}' ({op_desc})"
+
+    return False, None, ""
+
+def fuzzy_match(kw, txt):
+    """
+    模糊匹配优化:
+    1. 删掉 txt in kw 避免包含倒挂
+    2. 单字关键词直接返回 False，杜绝单字误触
+    3. sub_pairs 去掉 ('0','o') 与 ('l','1')
+    """
+    kw = kw.strip().lower().replace(" ", "")
+    txt = txt.strip().lower().replace(" ", "")
+    if not kw or not txt:
+        return False
+    if len(kw) <= 1:
+        return False
+    if kw in txt:
+        return True
+    sub_pairs = [("确走", "确定"), ("确让", "确认"), ("已", "己"), ("日", "曰")]
+    for p1, p2 in sub_pairs:
+        txt = txt.replace(p1, p2)
+        kw = kw.replace(p1, p2)
+    if kw in txt:
+        return True
+    common = sum(1 for c in kw if c in txt)
+    if len(kw) <= 2:
+        return common >= len(kw)
+    else:
+        return (common / len(kw)) >= 0.65
+
+class ThresholdTuningDialog(tk.Toplevel):
+    """
+    阈值调参助手 + 实时命中框预览:
+    采样 N 帧分析模板相似度分布，输出最低/最高/平均/标准差，并智能给出推荐阈值
+    """
+    def __init__(self, parent, target_img_path, current_threshold=0.70, region=None, on_apply=None):
+        super().__init__(parent)
+        self.title("🎯 模板匹配阈值调参助手与命中框实时预览")
+        self.target_img_path = target_img_path
+        self.current_threshold = current_threshold
+        self.region = region
+        self.on_apply = on_apply
+        self.sampling = False
+        self.samples = []
+        self.preview_photo = None
+
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        w = min(820, int(sw * 0.90))
+        h = min(580, int(sh * 0.90))
+        self.geometry(f"{w}x{h}")
+        self.minsize(680, 480)
+        self.configure(bg="#0f172a")
+
+        self.create_widgets()
+
+    def create_widgets(self):
+        top_bar = tk.Frame(self, bg="#1e293b", padx=12, pady=8)
+        top_bar.pack(fill=tk.X)
+        img_name = os.path.basename(self.target_img_path)
+        tk.Label(top_bar, text=f"🎯 调参目标: {img_name}", bg="#1e293b", fg="#38bdf8", font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT)
+        tk.Label(top_bar, text=f"当前阈值: {round(self.current_threshold, 2)}", bg="#1e293b", fg="#94a3b8", font=("Microsoft YaHei UI", 9)).pack(side=tk.RIGHT)
+
+        body = tk.Frame(self, bg="#0f172a", padx=12, pady=10)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        left = tk.Frame(body, bg="#1e293b", padx=12, pady=10, width=280)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        left.pack_propagate(False)
+
+        tk.Label(left, text="📊 采样参数配置", bg="#1e293b", fg="#f8fafc", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+
+        r_f = tk.Frame(left, bg="#1e293b")
+        r_f.pack(fill=tk.X, pady=4)
+        tk.Label(r_f, text="采样帧数 N:", bg="#1e293b", fg="#cbd5e1", font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT)
+        self.frames_spin = ttk.Spinbox(r_f, from_=3, to=30, width=6)
+        self.frames_spin.set(10)
+        self.frames_spin.pack(side=tk.RIGHT)
+
+        self.btn_sample = tk.Button(left, text="🚀 开始连续采样分析", command=self.start_sampling, bg="#3b82f6", fg="white", font=("Microsoft YaHei UI", 9, "bold"), relief=tk.FLAT, pady=6)
+        self.btn_sample.pack(fill=tk.X, pady=8)
+
+        self.lbl_status = tk.Label(left, text="等待开始采样...", bg="#1e293b", fg="#94a3b8", font=("Microsoft YaHei UI", 8))
+        self.lbl_status.pack(anchor="w", pady=2)
+
+        self.stats_frame = tk.LabelFrame(left, text=" 📈 分数统计分布 ", bg="#1e293b", fg="#34d399", font=("Microsoft YaHei UI", 9, "bold"), padx=8, pady=8)
+        self.stats_frame.pack(fill=tk.BOTH, expand=True, pady=6)
+
+        self.lbl_max = tk.Label(self.stats_frame, text="最高得分: --", bg="#1e293b", fg="#f8fafc", font=("Microsoft YaHei UI", 9))
+        self.lbl_max.pack(anchor="w", pady=1)
+        self.lbl_min = tk.Label(self.stats_frame, text="最低得分: --", bg="#1e293b", fg="#f8fafc", font=("Microsoft YaHei UI", 9))
+        self.lbl_min.pack(anchor="w", pady=1)
+        self.lbl_avg = tk.Label(self.stats_frame, text="平均得分: --", bg="#1e293b", fg="#f8fafc", font=("Microsoft YaHei UI", 9))
+        self.lbl_avg.pack(anchor="w", pady=1)
+        self.lbl_std = tk.Label(self.stats_frame, text="波动差(σ): --", bg="#1e293b", fg="#f8fafc", font=("Microsoft YaHei UI", 9))
+        self.lbl_std.pack(anchor="w", pady=1)
+
+        self.lbl_rec = tk.Label(self.stats_frame, text="💡 推荐设定: --", bg="#1e293b", fg="#f59e0b", font=("Microsoft YaHei UI", 9, "bold"))
+        self.lbl_rec.pack(anchor="w", pady=(6, 2))
+
+        self.btn_apply = tk.Button(left, text="✔ 应用推荐阈值", command=self.apply_recommended, bg="#10b981", fg="white", font=("Microsoft YaHei UI", 9, "bold"), relief=tk.FLAT, pady=6, state=tk.DISABLED)
+        self.btn_apply.pack(fill=tk.X, pady=(4, 0))
+
+        right = tk.Frame(body, bg="#1e293b", padx=10, pady=10)
+        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        tk.Label(right, text="🖼️ 实时画面与命中框 (绿色=高命中, 黄色=接近, 红色=未命中)", bg="#1e293b", fg="#cbd5e1", font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(0, 6))
+        self.preview_canvas = tk.Canvas(right, bg="#0f172a", highlightthickness=1, highlightbackground="#334155")
+        self.preview_canvas.pack(fill=tk.BOTH, expand=True)
+
+    def start_sampling(self):
+        if self.sampling:
+            return
+        self.sampling = True
+        self.samples = []
+        self.btn_sample.config(state=tk.DISABLED)
+        self.btn_apply.config(state=tk.DISABLED)
+        threading.Thread(target=self._sample_worker, daemon=True).start()
+
+    def _sample_worker(self):
+        try:
+            n = int(self.frames_spin.get())
+        except Exception:
+            n = 10
+        n = max(3, min(30, n))
+
+        target_path = self.target_img_path
+        if not os.path.isabs(target_path) and not os.path.exists(target_path):
+            target_path = os.path.join(BASE_DIR, target_path)
+
+        if not os.path.exists(target_path):
+            self.lbl_status.config(text="❌ 模板图片文件不存在！", fg="#ef4444")
+            self.btn_sample.config(state=tk.NORMAL)
+            self.sampling = False
+            return
+
+        with open(target_path, "rb") as f:
+            t_bytes = bytearray(f.read())
+        t_cv = cv2.imdecode(np.asarray(t_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if t_cv is None:
+            self.lbl_status.config(text="❌ 模板图片解码失败！", fg="#ef4444")
+            self.btn_sample.config(state=tk.NORMAL)
+            self.sampling = False
+            return
+        t_gray = cv2.cvtColor(t_cv, cv2.COLOR_BGR2GRAY)
+        th_h, th_w = t_gray.shape
+
+        for i in range(n):
+            if not self.winfo_exists():
+                return
+            self.lbl_status.config(text=f"正在采集第 {i+1}/{n} 帧...", fg="#38bdf8")
+            screenshot = safe_grab(bbox=self.region)
+            screen_np = np.array(screenshot)
+            screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
+            scr_h, scr_w = screen_gray.shape
+
+            best_val = -1.0
+            best_loc = (0, 0)
+            best_w, best_h = th_w, th_h
+
+            if th_w < scr_w and th_h < scr_h:
+                for scale in [1.0, 0.92, 1.08, 0.85, 1.15]:
+                    if scale == 1.0:
+                        scaled_t = t_gray
+                    else:
+                        nw, nh = int(th_w * scale), int(th_h * scale)
+                        if nw >= scr_w or nh >= scr_h or nw < 5 or nh < 5:
+                            continue
+                        scaled_t = cv2.resize(t_gray, (nw, nh), interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC)
+                    res = cv2.matchTemplate(screen_gray, scaled_t, cv2.TM_CCOEFF_NORMED)
+                    _, max_v, _, max_l = cv2.minMaxLoc(res)
+                    if max_v > best_val:
+                        best_val = max_v
+                        best_loc = max_l
+                        best_w, best_h = scaled_t.shape[1], scaled_t.shape[0]
+
+            score = max(0.0, float(best_val))
+            self.samples.append(score)
+
+            # 绘制实时命中框与得分
+            vis_img = screen_np.copy()
+            x1, y1 = best_loc
+            x2, y2 = x1 + best_w, y1 + best_h
+            box_color = (16, 185, 129) if score >= 0.75 else ((245, 158, 11) if score >= 0.60 else (239, 68, 68))
+            cv2.rectangle(vis_img, (x1, y1), (x2, y2), box_color, 2)
+            cv2.circle(vis_img, ((x1+x2)//2, (y1+y2)//2), 4, (0, 0, 255), -1)
+            cv2.putText(vis_img, f"{round(score*100, 1)}%", (x1, max(18, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_color, 2)
+
+            self._update_preview(vis_img)
+            time.sleep(0.12)
+
+        self._calc_statistics()
+        self.btn_sample.config(state=tk.NORMAL)
+        self.sampling = False
+
+    def _update_preview(self, cv_img):
+        try:
+            cw = self.preview_canvas.winfo_width()
+            ch = self.preview_canvas.winfo_height()
+            if cw < 50 or ch < 50:
+                cw, ch = 480, 380
+            h, w = cv_img.shape[:2]
+            scale = min(cw / w, ch / h)
+            nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+            resized = cv2.resize(cv_img, (nw, nh), interpolation=cv2.INTER_AREA)
+            rgb = Image.fromarray(resized)
+            self.preview_photo = ImageTk.PhotoImage(rgb)
+            self.preview_canvas.delete("all")
+            self.preview_canvas.create_image(cw // 2, ch // 2, image=self.preview_photo, anchor="center")
+        except Exception:
+            pass
+
+    def _calc_statistics(self):
+        if not self.samples:
+            return
+        max_s = max(self.samples)
+        min_s = min(self.samples)
+        avg_s = sum(self.samples) / len(self.samples)
+        variance = sum((s - avg_s) ** 2 for s in self.samples) / len(self.samples)
+        std_s = variance ** 0.5
+
+        rec_th = max(0.40, min(0.95, round(min_s - 0.05, 2)))
+        self.recommended_threshold = rec_th
+
+        self.lbl_max.config(text=f"最高得分: {round(max_s*100, 1)}%")
+        self.lbl_min.config(text=f"最低得分: {round(min_s*100, 1)}%")
+        self.lbl_avg.config(text=f"平均得分: {round(avg_s*100, 1)}%")
+        self.lbl_std.config(text=f"波动差(σ): ±{round(std_s*100, 1)}%")
+        self.lbl_rec.config(text=f"💡 推荐设定: {rec_th} ({round(rec_th*100)}%)")
+        self.lbl_status.config(text=f"✅ 完成 {len(self.samples)} 帧采样分析！", fg="#10b981")
+        self.btn_apply.config(state=tk.NORMAL)
+
+    def apply_recommended(self):
+        if hasattr(self, 'recommended_threshold') and self.on_apply:
+            self.on_apply(self.recommended_threshold)
+            self.destroy()
+
 class ScreenSnipper:
     def __init__(self, parent, callback, return_bbox=False):
         self.callback = callback
         self.return_bbox = return_bbox
         self.top = tk.Toplevel(parent)
         self.top.attributes('-alpha', 0.3)
-        self.top.attributes('-fullscreen', True)
         self.top.config(cursor="cross")
 
-        self.canvas = tk.Canvas(self.top, cursor="cross", bg="grey")
+        # 多显示器虚拟桌面全屏覆盖 (支持全部屏幕)
+        vx, vy, vw, vh = get_virtual_screen_geometry()
+        self.vx = vx
+        self.vy = vy
+        self.vw = vw
+        self.vh = vh
+        self.top.overrideredirect(True)
+        self.top.geometry(f"{vw}x{vh}+{vx}+{vy}")
+
+        self.canvas = tk.Canvas(self.top, cursor="cross", bg="grey", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
         self.canvas.bind("<ButtonPress-1>", self.on_press)
@@ -147,19 +517,19 @@ class ScreenSnipper:
         end_y = event.y
         self.top.destroy()
 
-        x1 = min(self.start_x, end_x)
-        y1 = min(self.start_y, end_y)
-        x2 = max(self.start_x, end_x)
-        y2 = max(self.start_y, end_y)
+        gx1 = min(self.start_x, end_x) + self.vx
+        gy1 = min(self.start_y, end_y) + self.vy
+        gx2 = max(self.start_x, end_x) + self.vx
+        gy2 = max(self.start_y, end_y) + self.vy
 
-        if (x2 - x1) > 5 and (y2 - y1) > 5:
-            bbox = (x1, y1, x2, y2)
+        if (gx2 - gx1) > 5 and (gy2 - gy1) > 5:
+            bbox = (gx1, gy1, gx2, gy2)
             if self.return_bbox:
                 self.callback(bbox)
                 return
             time.sleep(0.1)
-            img = ImageGrab.grab(bbox=bbox)
-            save_path = os.path.join(os.getcwd(), f"snip_{int(time.time())}.png")
+            img = safe_grab(bbox=bbox)
+            save_path = os.path.join(BASE_DIR, f"snip_{int(time.time())}.png")
             img.save(save_path)
             self.callback(save_path)
 
@@ -198,6 +568,8 @@ class RuleDialog(tk.Toplevel):
             "timeout_target_id": "",
             "next_timeout": 20.0,
             "humanize": True,
+            "match_index": 0,
+            "window_whitelist": "",
             "candidates": []
         }
         self.candidates = list(self.rule.get("candidates") or [])
@@ -289,7 +661,21 @@ class RuleDialog(tk.Toplevel):
         self.conf_scale = tk.Scale(self.conf_frame, from_=0.40, to=0.98, resolution=0.01, orient=tk.HORIZONTAL, bg="#0f172a", fg="white", highlightbackground="#0f172a", length=220)
         self.conf_scale.set(float(self.rule.get("confidence", 0.70)))
         self.conf_scale.pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(self.conf_frame, text="🎯 阈值调参助手(采样N帧)", command=self.open_threshold_tuner, bg="#8b5cf6", fg="white", font=("Microsoft YaHei UI", 8, "bold"), relief=tk.FLAT, padx=6, pady=1).pack(side=tk.LEFT, padx=(4, 8))
         tk.Label(self.conf_frame, text="(自适应0.85x~1.15x多尺度)", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
+
+        r_match_idx = tk.Frame(sec_base, bg="#0f172a")
+        r_match_idx.pack(fill=tk.X, pady=3)
+        tk.Label(r_match_idx, text="命中唯一性:", bg="#0f172a", fg="#cbd5e1", font=("Microsoft YaHei UI", 9, "bold"), width=11, anchor="w").pack(side=tk.LEFT)
+        self.match_idx_var = tk.StringVar(value=str(self.rule.get("match_index", 0)))
+        match_combo = ttk.Combobox(r_match_idx, textvariable=self.match_idx_var, values=[
+            "0 (严格唯一: 同屏多个相同目标时告警不执行)",
+            "1 (同屏多个时: 取第 1 个 - 自然从上到下从左到右)",
+            "2 (同屏多个时: 取第 2 个)",
+            "3 (同屏多个时: 取第 3 个)",
+            "4 (同屏多个时: 取第 4 个)"
+        ], state="readonly", width=42, font=("Microsoft YaHei UI", 9))
+        match_combo.pack(side=tk.LEFT, padx=(0, 6))
 
         r_prio = tk.Frame(sec_base, bg="#0f172a")
         r_prio.pack(fill=tk.X, pady=3)
@@ -326,6 +712,7 @@ class RuleDialog(tk.Toplevel):
         self.action_var = tk.StringVar(value=self.rule["action"])
         act_combo = ttk.Combobox(a1, textvariable=self.action_var, values=[
             "click (鼠标左键单击目标中心 - 真实穿透)",
+            "sequence (复合动作序列: 点击 -> 等待0.3s -> 粘贴 -> 回车)",
             "double_click (鼠标左键双击)",
             "right_click (鼠标右键点击)",
             "hover (鼠标移动至目标悬停)",
@@ -336,7 +723,7 @@ class RuleDialog(tk.Toplevel):
             "type_text (点击目标并输入文本)",
             "sound_alarm (播放蜂鸣警报音)",
             "take_screenshot (自动截图留存证据)"
-        ], state="readonly", width=40, font=("Microsoft YaHei UI", 9))
+        ], state="readonly", width=42, font=("Microsoft YaHei UI", 9))
         act_combo.pack(side=tk.LEFT, padx=(0, 10), fill=tk.X, expand=True)
         act_combo.bind("<<ComboboxSelected>>", self.on_action_change)
 
@@ -349,6 +736,23 @@ class RuleDialog(tk.Toplevel):
         self.act_param_entry.pack(side=tk.LEFT, padx=(0, 6), fill=tk.X, expand=True)
         self.lbl_param_hint = tk.Label(self.act_param_frame, text="", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8))
         self.lbl_param_hint.pack(side=tk.LEFT)
+
+        seq_bar = tk.Frame(sec_act, bg="#0f172a")
+        seq_bar.pack(fill=tk.X, pady=2)
+        tk.Label(seq_bar, text="复合序列快捷:", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
+        tk.Button(seq_bar, text="⚡ 典型序列: 点击 -> 等待 0.3s -> 粘贴 -> 回车", command=lambda: self.set_sequence_param("点击 -> 等待 0.3s -> 粘贴 -> 回车"), bg="#3b82f6", fg="white", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=4).pack(side=tk.LEFT, padx=2)
+        tk.Button(seq_bar, text="+点击", command=lambda: self.append_seq("点击"), bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3).pack(side=tk.LEFT, padx=1)
+        tk.Button(seq_bar, text="+等待0.3s", command=lambda: self.append_seq("等待 0.3s"), bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3).pack(side=tk.LEFT, padx=1)
+        tk.Button(seq_bar, text="+粘贴", command=lambda: self.append_seq("粘贴"), bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3).pack(side=tk.LEFT, padx=1)
+        tk.Button(seq_bar, text="+回车", command=lambda: self.append_seq("回车"), bg="#334155", fg="#cbd5e1", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=3).pack(side=tk.LEFT, padx=1)
+
+        a_win = tk.Frame(sec_act, bg="#0f172a")
+        a_win.pack(fill=tk.X, pady=3)
+        tk.Label(a_win, text="目标窗口白名单:", bg="#0f172a", fg="#cbd5e1", font=("Microsoft YaHei UI", 9, "bold"), width=11, anchor="w").pack(side=tk.LEFT)
+        self.whitelist_entry = tk.Entry(a_win, width=32, bg="#1e293b", fg="#fff", insertbackground="white", font=("Microsoft YaHei UI", 9))
+        self.whitelist_entry.insert(0, str(self.rule.get("window_whitelist", "")))
+        self.whitelist_entry.pack(side=tk.LEFT, padx=(0, 6), fill=tk.X, expand=True)
+        tk.Label(a_win, text="(进程名/标题关键词, 逗号分隔, 留空不限)", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
 
         a2 = tk.Frame(sec_act, bg="#0f172a")
         a2.pack(fill=tk.X, pady=3)
@@ -495,9 +899,10 @@ class RuleDialog(tk.Toplevel):
 
             p_raw = cand.get("image_path", "").strip()
             loaded_img = False
-            if p_raw and os.path.exists(p_raw):
+            real_p = p_raw if (os.path.isabs(p_raw) or os.path.exists(p_raw)) else os.path.join(BASE_DIR, p_raw)
+            if real_p and os.path.exists(real_p):
                 try:
-                    pil_im = Image.open(p_raw)
+                    pil_im = Image.open(real_p)
                     pil_im.thumbnail((48, 48))
                     photo = ImageTk.PhotoImage(pil_im)
                     self.img_tk_cache.append(photo)
@@ -646,6 +1051,45 @@ class RuleDialog(tk.Toplevel):
                 })
             self.render_candidates_ui()
 
+    def set_sequence_param(self, s):
+        self.action_var.set("sequence (复合动作序列: 点击 -> 等待0.3s -> 粘贴 -> 回车)")
+        self.on_action_change()
+        self.act_param_entry.delete(0, tk.END)
+        self.act_param_entry.insert(0, s)
+
+    def append_seq(self, step):
+        if not self.action_var.get().startswith("sequence"):
+            self.action_var.set("sequence (复合动作序列: 点击 -> 等待0.3s -> 粘贴 -> 回车)")
+            self.on_action_change()
+        cur = self.act_param_entry.get().strip()
+        if cur:
+            self.act_param_entry.delete(0, tk.END)
+            self.act_param_entry.insert(0, f"{cur} -> {step}")
+        else:
+            self.act_param_entry.insert(0, step)
+
+    def open_threshold_tuner(self, candidate=None):
+        target_path = ""
+        if candidate and candidate.get("image_path"):
+            target_path = candidate.get("image_path").strip()
+        else:
+            raw_target = self.target_entry.get().strip()
+            first_path = [p.strip() for p in raw_target.replace("|", ";").split(";") if p.strip()]
+            if first_path:
+                target_path = first_path[0]
+            elif self.candidates:
+                target_path = self.candidates[0].get("image_path", "").strip()
+
+        if not target_path:
+            messagebox.showinfo("提示", "请先选择或框选至少一张图片作为调参目标！")
+            return
+
+        def _on_apply(val):
+            self.conf_scale.set(val)
+
+        region = getattr(self.master, "target_region", None) if hasattr(self, "master") else None
+        ThresholdTuningDialog(self, target_path, current_threshold=float(self.conf_scale.get()), region=region, on_apply=_on_apply)
+
     def on_flow_mode_change(self, event=None):
         mode = self.next_mode_var.get().split(" ")[0]
         if mode == "jump":
@@ -779,6 +1223,12 @@ class RuleDialog(tk.Toplevel):
         target_rule_id = self.target_id_map.get(self.jump_combo_var.get(), "")
         timeout_target_id = self.timeout_id_map.get(self.timeout_combo_var.get(), "")
 
+        m_idx_str = self.match_idx_var.get().split(" ")[0]
+        try:
+            m_idx = int(m_idx_str)
+        except Exception:
+            m_idx = 0
+
         self.rule.update({
             "name": name,
             "enabled": self.enabled_var.get(),
@@ -786,6 +1236,8 @@ class RuleDialog(tk.Toplevel):
             "type": t_raw,
             "target": target,
             "confidence": float(self.conf_scale.get()),
+            "match_index": m_idx,
+            "window_whitelist": self.whitelist_entry.get().strip(),
             "offset_x": ox,
             "offset_y": oy,
             "action": act_raw,
@@ -861,7 +1313,7 @@ class RealScreenScanBot:
         self.start_watchdog_thread()
 
     def load_rules_from_file(self):
-        file_path = os.path.join(os.getcwd(), "rpa_rules.json")
+        file_path = os.path.join(BASE_DIR, "rpa_rules.json")
         if os.path.exists(file_path):
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
@@ -872,15 +1324,22 @@ class RealScreenScanBot:
                         self.rules = data.get("rules", [])
             except Exception:
                 self.rules = []
-        # 恢复持久化的 ROI 区域设置
-        settings_path = os.path.join(os.getcwd(), "rpa_settings.json")
+        # 恢复持久化的 ROI 区域设置并校验是否超出当前屏幕范围
+        settings_path = os.path.join(BASE_DIR, "rpa_settings.json")
         if os.path.exists(settings_path):
             try:
                 with open(settings_path, "r", encoding="utf-8") as f:
                     st = json.load(f)
                     reg = st.get("target_region")
                     if reg and len(reg) == 4:
-                        self.target_region = tuple(reg)
+                        rx1, ry1, rx2, ry2 = reg
+                        vx, vy, vw, vh = get_virtual_screen_geometry()
+                        # 越界判定
+                        if rx1 < vx or ry1 < vy or rx2 > (vx + vw) or ry2 > (vy + vh) or rx1 >= rx2 or ry1 >= ry2:
+                            self.target_region = None
+                            self.roi_fallback_message = f"持久化 ROI 区域 ({rx1},{ry1})-({rx2},{ry2}) 已超出当前屏幕范围 [({vx},{vy})-({vx+vw},{vy+vh})]，已自动回落为全屏监控！"
+                        else:
+                            self.target_region = tuple(reg)
             except Exception:
                 pass
         if not self.rules:
@@ -988,7 +1447,7 @@ class RealScreenScanBot:
 ]''')
 
     def save_rules_to_file(self):
-        file_path = os.path.join(os.getcwd(), "rpa_rules.json")
+        file_path = os.path.join(BASE_DIR, "rpa_rules.json")
         try:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(self.rules, f, ensure_ascii=False, indent=2)
@@ -996,7 +1455,7 @@ class RealScreenScanBot:
             pass
         # 持久化 ROI 区域配置到 rpa_settings.json，重启不丢失
         try:
-            settings_path = os.path.join(os.getcwd(), "rpa_settings.json")
+            settings_path = os.path.join(BASE_DIR, "rpa_settings.json")
             with open(settings_path, "w", encoding="utf-8") as f:
                 json.dump({
                     "target_region": list(self.target_region) if self.target_region else None
@@ -1099,6 +1558,7 @@ class RealScreenScanBot:
         tk.Button(row2, text="🖱️ 真实点击测试(2s后)", command=self.test_real_click_selected_rule, bg="#0ea5e9", fg="white", font=("Microsoft YaHei UI", 8, "bold"), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 4))
         tk.Button(row2, text="🎨 屏幕吸管取色", command=self.start_color_picker, bg="#0284c7", fg="white", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 4))
         tk.Button(row2, text="⏱️ 3秒物理点击", command=self.test_physical_click_at_cursor, bg="#475569", fg="#f8fafc", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(row2, text="🎯 阈值调参助手", command=self.open_threshold_tuner_from_main, bg="#8b5cf6", fg="white", font=("Microsoft YaHei UI", 8, "bold"), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 4))
         tk.Button(row2, text="🩺 规则健康体检", command=self.run_preflight_health_check, bg="#6366f1", fg="white", font=("Microsoft YaHei UI", 8, "bold"), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.LEFT)
 
         # 5. 控制面板（全功能展示）
@@ -1120,7 +1580,11 @@ class RealScreenScanBot:
         self.arb_combo.pack(side=tk.LEFT, padx=(0, 10))
 
         self.dry_run_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(ctrl_frame, text="🛡️ Dry-Run 试运行 (只记录不点击)", variable=self.dry_run_var, bg="#0f172a", fg="#38bdf8", selectcolor="#1e293b", font=("Microsoft YaHei UI", 8, "bold")).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Checkbutton(ctrl_frame, text="🛡️ Dry-Run 试运行 (只记录不点击)", variable=self.dry_run_var, bg="#0f172a", fg="#38bdf8", selectcolor="#1e293b", font=("Microsoft YaHei UI", 8, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+
+        tk.Label(ctrl_frame, text="全局窗口白名单:", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
+        self.global_whitelist_entry = tk.Entry(ctrl_frame, width=12, bg="#1e293b", fg="#fff", insertbackground="white", font=("Microsoft YaHei UI", 8))
+        self.global_whitelist_entry.pack(side=tk.LEFT, padx=(2, 8))
 
         tk.Label(ctrl_frame, text="执行上限:", bg="#0f172a", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
         self.max_runs_entry = tk.Entry(ctrl_frame, width=4, bg="#1e293b", fg="#fff", insertbackground="white", font=("Microsoft YaHei UI", 8))
@@ -1157,6 +1621,9 @@ class RealScreenScanBot:
 
         self.refresh_rules_tree()
         self.log("ScreenScan RPA 智能工作台就绪！自适应视窗防裁剪已就绪，看门狗自愈守护已激活。")
+        if getattr(self, "roi_fallback_message", None):
+            self.log(f"⚠️ {self.roi_fallback_message}")
+            self.root.after(500, lambda: messagebox.showwarning("ROI 越界重置", self.roi_fallback_message))
 
     def apply_preset(self, key):
         presets = {
@@ -1245,7 +1712,7 @@ class RealScreenScanBot:
             time.sleep(2.0)
             
             region = getattr(self, "target_region", None)
-            screenshot = ImageGrab.grab(bbox=region)
+            screenshot = safe_grab(bbox=region)
             screen_np = np.array(screenshot)
             screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
             ret = self.detect_single_rule(rule, screenshot, screen_gray, region=region)
@@ -1378,7 +1845,7 @@ class RealScreenScanBot:
                 self.log(f"倒计时 {i} 秒...")
                 time.sleep(1.0)
             x, y = pyautogui.position()
-            screenshot = ImageGrab.grab()
+            screenshot = safe_grab()
             rgb = screenshot.getpixel((x, y))
             hex_color = "#{:02x}{:02x}{:02x}".format(rgb[0], rgb[1], rgb[2])
             val_str = f"{x},{y},{hex_color}"
@@ -1444,6 +1911,7 @@ class RealScreenScanBot:
             h = bbox[3] - bbox[1]
             self.lbl_roi_status.config(text=f"🎯 ROI: ({bbox[0]},{bbox[1]})-({bbox[2]},{bbox[3]}) [{w}x{h}]", fg="#10b981")
             self.log(f"🎯 已限定识别监控区域 (ROI): ({bbox[0]}, {bbox[1]}) 到 ({bbox[2]}, {bbox[3]}) [{w}x{h}]，大幅降低全屏扫描开销！")
+            self.save_rules_to_file()
 
     def reset_roi_fullscreen(self):
         self.target_region = None
@@ -1463,12 +1931,15 @@ class RealScreenScanBot:
                 if cands:
                     for c in cands:
                         p = c.get("image_path", "").strip()
-                        if p and not os.path.exists(p):
-                            issues.append(f"❌ 步骤【{r_name}】候选图路径不存在: {p}")
+                        if p:
+                            real_p = p if (os.path.isabs(p) or os.path.exists(p)) else os.path.join(BASE_DIR, p)
+                            if not os.path.exists(real_p):
+                                issues.append(f"❌ 步骤【{r_name}】候选图路径不存在: {p}")
                 else:
                     paths = [p.strip() for p in r.get("target", "").replace("|", ";").split(";") if p.strip()]
                     for p in paths:
-                        if not os.path.exists(p):
+                        real_p = p if (os.path.isabs(p) or os.path.exists(p)) else os.path.join(BASE_DIR, p)
+                        if not os.path.exists(real_p):
                             issues.append(f"❌ 步骤【{r_name}】目标图片不存在: {p}")
             
             if r.get("next_mode") == "jump":
@@ -1588,7 +2059,7 @@ class RealScreenScanBot:
         def _worker():
             self.log(f"🔍 正在测试步骤【{rule['name']}】...")
             region = getattr(self, "target_region", None)
-            screenshot = ImageGrab.grab(bbox=region)
+            screenshot = safe_grab(bbox=region)
             screen_np = np.array(screenshot)
             screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
 
@@ -1618,14 +2089,249 @@ class RealScreenScanBot:
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def detect_single_rule(self, rule, screenshot_pil, screen_gray, region=None):
+    def open_threshold_tuner_from_main(self):
+        sel = self.tree.selection()
+        rule = None
+        if sel:
+            r_id = sel[0]
+            rule = next((r for r in self.rules if r["id"] == r_id), None)
+        
+        target_path = ""
+        th_val = 0.70
+        if rule:
+            th_val = float(rule.get("confidence", 0.70))
+            cands = rule.get("candidates") or []
+            if cands:
+                target_path = cands[0].get("image_path", "").strip()
+            else:
+                paths = [p.strip() for p in rule.get("target", "").replace("|", ";").split(";") if p.strip()]
+                if paths:
+                    target_path = paths[0]
+        
+        if not target_path:
+            for r in self.rules:
+                cands = r.get("candidates") or []
+                if cands and cands[0].get("image_path"):
+                    target_path = cands[0].get("image_path").strip()
+                    th_val = float(r.get("confidence", 0.70))
+                    break
+                paths = [p.strip() for p in r.get("target", "").replace("|", ";").split(";") if p.strip()]
+                if paths and (paths[0].endswith(".png") or paths[0].endswith(".jpg")):
+                    target_path = paths[0]
+                    th_val = float(r.get("confidence", 0.70))
+                    break
+        
+        if not target_path:
+            messagebox.showinfo("提示", "当前没有选中的步骤或图片规则，请先在列表中选中包含图片的步骤！")
+            return
+
+        def _on_apply(val):
+            if rule:
+                rule["confidence"] = val
+                self.save_rules_to_file()
+                self.refresh_rules_tree()
+                self.log(f"🎯 已将步骤【{rule['name']}】相似度阈值更新为 {val}！")
+
+        region = getattr(self, "target_region", None)
+        ThresholdTuningDialog(self.root, target_path, current_threshold=th_val, region=region, on_apply=_on_apply)
+
+    def run_shared_ocr(self, screenshot_pil):
+        """
+        每轮状态机扫描仅对当前截图执行一次 4 变体 OCR，生成共享条目列表供所有 text 规则快速复用，
+        彻底消除由于多条文字规则导致系统卡死变慢的隐患。
+        """
+        if not WINOCR_AVAILABLE:
+            return []
+
+        pil_images = [(screenshot_pil, 1.0, "原图")]
+        try:
+            np_img = np.array(screenshot_pil)
+            gray = cv2.cvtColor(np_img, cv2.COLOR_RGB2GRAY)
+            
+            resized = cv2.resize(gray, (0, 0), fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+            enhanced = clahe.apply(resized)
+            pil_images.append((Image.fromarray(enhanced), 2.0, "CLAHE增强"))
+
+            _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            otsu_res = cv2.resize(otsu, (0, 0), fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            pil_images.append((Image.fromarray(otsu_res), 2.0, "Otsu二值"))
+
+            inv_otsu = cv2.bitwise_not(otsu)
+            inv_res = cv2.resize(inv_otsu, (0, 0), fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            pil_images.append((Image.fromarray(inv_res), 2.0, "反色二值"))
+        except Exception:
+            pass
+
+        extracted_items = []
+        for p_img, scale, variant_name in pil_images:
+            try:
+                result = winocr.recognize_pil_sync(p_img, 'zh-Hans-CN')
+                res_lines = result.get('lines') if hasattr(result, 'get') else getattr(result, 'lines', None)
+                if not result or not res_lines:
+                    continue
+                for line in res_lines:
+                    txt = (line.get('text') if hasattr(line, 'get') else getattr(line, 'text', '')).strip()
+                    if not txt:
+                        continue
+                    words = line.get('words') if hasattr(line, 'get') else getattr(line, 'words', [])
+                    coord = None
+                    if words:
+                        w0 = getattr(words[0], 'bounding_rect', None) or (words[0].get('bounding_rect') if hasattr(words[0], 'get') else None)
+                        w1 = getattr(words[-1], 'bounding_rect', None) or (words[-1].get('bounding_rect') if hasattr(words[-1], 'get') else None)
+                        w0_x = getattr(w0, 'x', 0) if hasattr(w0, 'x') else (w0.get('x', 0) if w0 else 0)
+                        w0_y = getattr(w0, 'y', 0) if hasattr(w0, 'y') else (w0.get('y', 0) if w0 else 0)
+                        w1_x = getattr(w1, 'x', 0) if hasattr(w1, 'x') else (w1.get('x', 0) if w1 else 0)
+                        w1_y = getattr(w1, 'y', 0) if hasattr(w1, 'y') else (w1.get('y', 0) if w1 else 0)
+                        w1_w = getattr(w1, 'width', 0) if hasattr(w1, 'width') else (w1.get('width', 0) if w1 else 0)
+                        w1_h = getattr(w1, 'height', 0) if hasattr(w1, 'height') else (w1.get('height', 0) if w1 else 0)
+                        cx = (w0_x + w1_x + w1_w) // 2
+                        cy = (w0_y + w1_y + w1_h) // 2
+                        coord = (int(cx / scale), int(cy / scale))
+                    extracted_items.append({
+                        "text": txt,
+                        "words": words,
+                        "coord": coord,
+                        "scale": scale,
+                        "variant": variant_name
+                    })
+            except Exception:
+                continue
+
+        return extracted_items
+
+    def parse_and_execute_composite_action(self, coord, param_str, rule, candidate=None):
+        """
+        复合动作序列执行引擎: 支持一条规则内配置'点击 -> 等待 0.3s -> 粘贴 -> 回车'等复合动作链
+        """
+        humanize = rule.get("humanize", True)
+        ix, iy = coord if coord else (0, 0)
+        steps = [s.strip() for s in re.split(r"->|→|;|\n", str(param_str)) if s.strip()]
+        if not steps:
+            steps = ["点击"]
+
+        self.log(f"⚡ 【执行复合动作序列】共 {len(steps)} 个子动作: {' → '.join(steps)}")
+        for idx, raw_step in enumerate(steps):
+            if not self.running:
+                break
+            s = raw_step.lower()
+            self.log(f"   [动作序列 {idx+1}/{len(steps)}] {raw_step}")
+
+            if any(k in s for k in ("点击", "click", "单击")):
+                if coord:
+                    self.hardware_click(ix, iy, button="left", humanize=humanize)
+                else:
+                    self.log(f"   ⚠️ 子动作【{raw_step}】无物理坐标，跳过点击")
+            elif any(k in s for k in ("双击", "double_click")):
+                if coord:
+                    self.hardware_click(ix, iy, button="left", humanize=humanize)
+                    time.sleep(0.08)
+                    self.hardware_click(ix, iy, button="left", humanize=humanize)
+                else:
+                    self.log(f"   ⚠️ 子动作【{raw_step}】无物理坐标，跳过双击")
+            elif any(k in s for k in ("右键", "右击", "right_click")):
+                if coord:
+                    self.hardware_click(ix, iy, button="right", humanize=humanize)
+                else:
+                    self.log(f"   ⚠️ 子动作【{raw_step}】无物理坐标，跳过右键")
+            elif any(k in s for k in ("等待", "sleep", "wait")):
+                m = re.search(r'(\d+(?:\.\d+)?)', s)
+                sec = float(m.group(1)) if m else 0.3
+                time.sleep(sec)
+            elif any(k in s for k in ("粘贴", "paste")):
+                if ":" in raw_step or "：" in raw_step:
+                    content = re.split(r'[:：]', raw_step, 1)[1].strip()
+                    if content:
+                        try:
+                            self.root.clipboard_clear()
+                            self.root.clipboard_append(content)
+                            self.root.update()
+                        except Exception:
+                            pass
+                pyautogui.hotkey('ctrl', 'v')
+            elif any(k in s for k in ("回车", "enter", "press_enter")):
+                pyautogui.press('enter')
+            elif any(k in s for k in ("输入", "type")):
+                content = ""
+                if ":" in raw_step or "：" in raw_step:
+                    content = re.split(r'[:：]', raw_step, 1)[1].strip()
+                if content:
+                    pyautogui.write(content, interval=0.03)
+            elif any(k in s for k in ("快捷键", "hotkey")):
+                keys_str = ""
+                if ":" in raw_step or "：" in raw_step:
+                    keys_str = re.split(r'[:：]', raw_step, 1)[1].strip()
+                keys = [k.strip().lower() for k in keys_str.split("+") if k.strip()]
+                if keys:
+                    pyautogui.hotkey(*keys)
+            elif any(k in s for k in ("滚轮下", "scroll_down")):
+                m = re.search(r'(\d+)', s)
+                amt = int(m.group(1)) if m else 3
+                pyautogui.scroll(-amt * 100)
+            elif any(k in s for k in ("滚轮上", "scroll_up")):
+                m = re.search(r'(\d+)', s)
+                amt = int(m.group(1)) if m else 3
+                pyautogui.scroll(amt * 100)
+            elif any(k in s for k in ("截图", "screenshot")):
+                p = os.path.join(BASE_DIR, f"evidence_{int(time.time())}.png")
+                safe_grab().save(p)
+                self.log(f"   📷 截图保存: {os.path.basename(p)}")
+            elif any(k in s for k in ("蜂鸣", "alarm")):
+                try:
+                    import winsound
+                    winsound.Beep(1000, 300)
+                except Exception:
+                    pass
+            time.sleep(0.05)
+
+    def verify_action_result_and_retry(self, rule, candidate, coord, region, id_to_rule):
+        """
+        动作后加验证:
+        点击后等目标消失或下一步出现，未达成则失败重试 1~2 次再判定失败
+        """
+        action = (candidate.get("action") if candidate else None) or rule.get("action", "click")
+        if action not in ("click", "double_click", "right_click", "press_enter", "type_text", "sequence"):
+            return True
+
+        cand_jump = candidate.get("next_target_id") if candidate else None
+        next_step_id = cand_jump or rule.get("next_target_id")
+        next_r = id_to_rule.get(next_step_id) if next_step_id else None
+
+        for attempt in range(1, 3):
+            if not self.running:
+                break
+            time.sleep(0.35)
+            screenshot = safe_grab(bbox=region)
+            screen_np = np.array(screenshot)
+            screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
+
+            # 验证情况 1: 下一步目标已经出现
+            if next_r:
+                ret_next = self.detect_single_rule(next_r, screenshot, screen_gray, region=region)
+                if ret_next[0]:
+                    self.log(f"✅ 【动作后验证成功】下一步【{next_r['name']}】已成功就绪！")
+                    return True
+
+            # 验证情况 2: 原目标已在屏幕上消失
+            ret_curr = self.detect_single_rule(rule, screenshot, screen_gray, region=region)
+            if not ret_curr[0]:
+                self.log(f"✅ 【动作后验证成功】步骤【{rule['name']}】原目标已成功消失响应！")
+                return True
+
+            # 目标仍存在且下一步未出现，发起重试
+            self.log(f"🔄 【动作未响应重试 {attempt}/2】步骤【{rule['name']}】目标未消失且下一步未出现，正在重试点击...")
+            self.execute_smart_action(coord, rule, candidate=candidate, is_retry=True)
+
+        self.log(f"⚠️ 【动作后验证判定】步骤【{rule['name']}】重试 2 次后目标仍未变化，跳过以免陷入死循环。")
+        return False
+
+    def detect_single_rule(self, rule, screenshot_pil, screen_gray, region=None, cached_ocr=None):
         r_type = rule.get("type", "image")
         target = rule.get("target", "")
 
         if r_type == "image":
             candidates = rule.get("candidates") or []
             if candidates:
-                # 同一个动作放入多张图片，全部识别一次，按优先级执行
                 matched_cands = []
                 for c in candidates:
                     if not c.get("enabled", True):
@@ -1635,17 +2341,14 @@ class RealScreenScanBot:
                         continue
                     paths = [p.strip() for p in p_raw.replace("|", ";").split(";") if p.strip()]
                     c_conf = float(c.get("confidence", rule.get("confidence", 0.70)))
+                    c_match_idx = c.get("match_index", rule.get("match_index", 0))
                     c_matched = False
                     c_best_score = 0.0
                     c_best_coord = None
                     c_best_info = ""
-                    missing_paths = [p for p in paths if not os.path.exists(p)]
-                    valid_paths = [p for p in paths if os.path.exists(p)]
-                    if missing_paths and not valid_paths:
-                        self.log(f"⚠️ 【候选图文件缺失】步骤【{rule.get('name')}】候选[{c.get('name') or '图'}]文件缺失: {', '.join(missing_paths)}")
 
-                    for p in valid_paths:
-                        matched, info, coord, sc = self._match_template(p, screen_gray, c_conf)
+                    for p in paths:
+                        matched, info, coord, sc = self._match_template(p, screen_gray, c_conf, match_index=c_match_idx)
                         if matched and sc > c_best_score:
                             c_matched = True
                             c_best_score = sc
@@ -1661,7 +2364,6 @@ class RealScreenScanBot:
                         })
 
                 if matched_cands:
-                    # 严格按优先级从高到低 (数字 1 为最高优先级，相同优先级按相似得分降序)
                     matched_cands.sort(key=lambda x: (x["priority"], -x["score"]))
                     win = matched_cands[0]
                     win_c = win["candidate"]
@@ -1676,32 +2378,27 @@ class RealScreenScanBot:
             paths = [p.strip() for p in target.replace("|", ";").split(";") if p.strip()]
             if not paths:
                 return False, "未填写目标图片路径", None, 0.0, None
-            missing_paths = [p for p in paths if not os.path.exists(p)]
-            valid_paths = [p for p in paths if os.path.exists(p)]
-            if missing_paths and not valid_paths:
-                return False, f"目标图片文件缺失: {', '.join(missing_paths)}", None, 0.0, None
 
             best_score = 0.0
             best_res = (False, f"候选图片未命中(共{len(paths)}张)", None, 0.0, None)
-            for p in valid_paths:
-                matched, info, coord, sc = self._match_template(p, screen_gray, float(rule.get("confidence", 0.70)))
+            r_match_idx = rule.get("match_index", 0)
+            for p in paths:
+                matched, info, coord, sc = self._match_template(p, screen_gray, float(rule.get("confidence", 0.70)), match_index=r_match_idx)
                 if matched and sc > best_score:
                     best_score = sc
-                    best_res = (True, f"多图匹配成功[{os.path.basename(p)}]: {info}", coord, sc, None)
+                    best_res = (True, info, coord, sc, None)
+
             return best_res
 
         elif r_type == "image_vanish":
             paths = [p.strip() for p in target.replace("|", ";").split(";") if p.strip()]
             if not paths:
                 return False, "未填写目标图片路径", None, 0.0, None
-            missing_paths = [p for p in paths if not os.path.exists(p)]
-            valid_paths = [p for p in paths if os.path.exists(p)]
-            if missing_paths and not valid_paths:
-                return False, f"目标图片文件缺失: {', '.join(missing_paths)}", None, 0.0, None
             any_exists = False
             last_info = ""
-            for p in valid_paths:
-                matched, info, coord, sc = self._match_template(p, screen_gray, float(rule.get("confidence", 0.70)))
+            r_match_idx = rule.get("match_index", 0)
+            for p in paths:
+                matched, info, coord, sc = self._match_template(p, screen_gray, float(rule.get("confidence", 0.70)), match_index=r_match_idx)
                 if matched:
                     any_exists = True
                     last_info = info
@@ -1714,83 +2411,36 @@ class RealScreenScanBot:
         elif r_type == "text":
             kws = [k.strip() for k in target.replace("|", ";").split(";") if k.strip()]
             if not kws:
-                return False, "未填写要识别的文字关键词", None, 0.0, None
+                return False, "未填写要识别的文字关键词或数值条件", None, 0.0, None
             if not WINOCR_AVAILABLE:
                 return False, "系统未加载 winocr 模块", None, 0.0, None
 
-            def fuzzy_match(kw, txt):
-                kw = kw.strip().lower().replace(" ", "")
-                txt = txt.strip().lower().replace(" ", "")
-                if not kw or not txt:
-                    return False
-                if kw in txt or txt in kw:
-                    return True
-                sub_pairs = [("确走", "确定"), ("确让", "确认"), ("0", "o"), ("l", "1"), ("已", "己"), ("日", "曰")]
-                for p1, p2 in sub_pairs:
-                    txt = txt.replace(p1, p2)
-                    kw = kw.replace(p1, p2)
-                if kw in txt:
-                    return True
-                common = sum(1 for c in kw if c in txt)
-                if len(kw) <= 2:
-                    return common >= len(kw)
-                else:
-                    return (common / len(kw)) >= 0.65
+            # 共享全局 OCR 缓存结果，彻底解决多条文字规则导致系统卡死变慢
+            ocr_items = cached_ocr if cached_ocr is not None else self.run_shared_ocr(screenshot_pil)
 
-            try:
-                pil_images = [screenshot_pil]
-                try:
-                    np_img = np.array(screenshot_pil)
-                    gray = cv2.cvtColor(np_img, cv2.COLOR_RGB2GRAY)
-                    
-                    resized = cv2.resize(gray, (0, 0), fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-                    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8,8))
-                    enhanced = clahe.apply(resized)
-                    pil_images.append(Image.fromarray(enhanced))
+            for item in ocr_items:
+                txt = item["text"]
+                coord = item["coord"]
+                var_name = item["variant"]
+                for kw in kws:
+                    # 1. 数值条件判断 (用于价格、库存、倒计时、血量等数值运算)
+                    is_num, val, num_desc = evaluate_numeric_condition(kw, txt)
+                    if is_num:
+                        if coord:
+                            return True, f"智能OCR({var_name})数值条件命中: {num_desc}", coord, 0.96, None
+                        else:
+                            return True, f"智能OCR({var_name})数值条件命中: {num_desc}，但无单词坐标(已置None阻止误点)", None, 0.96, None
 
-                    _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                    otsu_res = cv2.resize(otsu, (0, 0), fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-                    pil_images.append(Image.fromarray(otsu_res))
+                    # 2. 严谨模糊匹配 (已优化: 去除 txt in kw, 单字返回 False, 去除 0/o 和 l/1 混淆)
+                    if fuzzy_match(kw, txt):
+                        sc = 1.0 if kw == txt else (0.95 if kw in txt else 0.82)
+                        if coord:
+                            return True, f"智能OCR({var_name})识别 '{kw}' (文本: '{txt}')", coord, sc, None
+                        else:
+                            return True, f"智能OCR({var_name})识别到 '{kw}' (文本: '{txt}')，但无单词坐标(已置None阻止误点)", None, sc, None
 
-                    inv_otsu = cv2.bitwise_not(otsu)
-                    inv_res = cv2.resize(inv_otsu, (0, 0), fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-                    pil_images.append(Image.fromarray(inv_res))
-                except Exception:
-                    pass
-
-                found_all = []
-                for idx, p_img in enumerate(pil_images):
-                    result = winocr.recognize_pil_sync(p_img, 'zh-Hans-CN')
-                    res_lines = result.get('lines') if hasattr(result, 'get') else getattr(result, 'lines', None)
-                    if result and res_lines:
-                        for line in res_lines:
-                            txt = (line.get('text') if hasattr(line, 'get') else getattr(line, 'text', '')).strip()
-                            found_all.append(txt)
-                            for kw in kws:
-                                if fuzzy_match(kw, txt):
-                                    words = line.get('words') if hasattr(line, 'get') else getattr(line, 'words', [])
-                                    variant_name = ["原图", "CLAHE增强", "Otsu二值", "反色二值"][idx] if idx < 4 else "预处理"
-                                    sc = 1.0 if kw == txt else (0.95 if kw in txt else 0.82)
-                                    if words:
-                                        w0 = getattr(words[0], 'bounding_rect', None) or (words[0].get('bounding_rect') if hasattr(words[0], 'get') else None)
-                                        w1 = getattr(words[-1], 'bounding_rect', None) or (words[-1].get('bounding_rect') if hasattr(words[-1], 'get') else None)
-                                        w0_x = getattr(w0, 'x', 0) if hasattr(w0, 'x') else (w0.get('x', 0) if w0 else 0)
-                                        w0_y = getattr(w0, 'y', 0) if hasattr(w0, 'y') else (w0.get('y', 0) if w0 else 0)
-                                        w1_x = getattr(w1, 'x', 0) if hasattr(w1, 'x') else (w1.get('x', 0) if w1 else 0)
-                                        w1_y = getattr(w1, 'y', 0) if hasattr(w1, 'y') else (w1.get('y', 0) if w1 else 0)
-                                        w1_w = getattr(w1, 'width', 0) if hasattr(w1, 'width') else (w1.get('width', 0) if w1 else 0)
-                                        w1_h = getattr(w1, 'height', 0) if hasattr(w1, 'height') else (w1.get('height', 0) if w1 else 0)
-                                        cx = (w0_x + w1_x + w1_w) // 2
-                                        cy = (w0_y + w1_y + w1_h) // 2
-                                        scale = 1.0 if idx == 0 else 2.0
-                                        cx, cy = int(cx / scale), int(cy / scale)
-                                        return True, f"智能OCR({variant_name})识别 '{kw}' (文本: '{txt}')", (cx, cy), sc, None
-                                    else:
-                                        return True, f"智能OCR({variant_name})识别到 '{kw}' (文本: '{txt}')，但无单词坐标(words为空，已置None阻止误点)", None, sc, None
-                sample = " | ".join(list(set(found_all))[:8]) if found_all else "无"
-                return False, f"未匹配关键词 {kws}。OCR识别到: [{sample}]", None, 0.0, None
-            except Exception as e:
-                return False, f"智能OCR异常: {e}", None, 0.0, None
+            sample = " | ".join(list(set(it["text"] for it in ocr_items))[:8]) if ocr_items else "无"
+            return False, f"未匹配关键词/数值条件 {kws}。OCR识别到: [{sample}]", None, 0.0, None
 
         elif r_type == "color":
             try:
@@ -1828,18 +2478,22 @@ class RealScreenScanBot:
 
         return False, "未知识别类型", None, 0.0, None
 
-    def _match_template(self, target_path, screen_gray, threshold):
+    def _match_template(self, target_path, screen_gray, threshold, match_index=0):
         try:
             if not hasattr(self, 'template_cache'):
                 self.template_cache = {}
 
-            mtime = os.path.getmtime(target_path) if os.path.exists(target_path) else 0
-            cached = self.template_cache.get(target_path)
+            real_path = target_path if (os.path.isabs(target_path) or os.path.exists(target_path)) else os.path.join(BASE_DIR, target_path)
+            if not os.path.exists(real_path) and os.path.exists(target_path):
+                real_path = target_path
+
+            mtime = os.path.getmtime(real_path) if os.path.exists(real_path) else 0
+            cached = self.template_cache.get(real_path)
             if cached and cached.get("mtime") == mtime:
                 t_gray = cached["gray"]
                 th_h, th_w = cached["size"]
             else:
-                with open(target_path, "rb") as f:
+                with open(real_path, "rb") as f:
                     t_bytes = bytearray(f.read())
                 t_np = np.asarray(t_bytes, dtype=np.uint8)
                 t_cv = cv2.imdecode(t_np, cv2.IMREAD_COLOR)
@@ -1848,7 +2502,7 @@ class RealScreenScanBot:
 
                 t_gray = cv2.cvtColor(t_cv, cv2.COLOR_BGR2GRAY)
                 th_h, th_w = t_gray.shape
-                self.template_cache[target_path] = {
+                self.template_cache[real_path] = {
                     "img": t_cv,
                     "gray": t_gray,
                     "size": (th_h, th_w),
@@ -1862,6 +2516,7 @@ class RealScreenScanBot:
             best_val = -1
             best_loc = None
             best_w, best_h = th_w, th_h
+            best_res = None
 
             scales = [1.0, 0.92, 1.08, 0.85, 1.15]
             for scale in scales:
@@ -1879,19 +2534,51 @@ class RealScreenScanBot:
                     best_val = max_v
                     best_loc = max_l
                     best_w, best_h = scaled_t.shape[1], scaled_t.shape[0]
+                    best_res = res
 
             best_pct = round(best_val * 100, 1)
             th_pct = round(threshold * 100, 1)
 
-            if best_val >= threshold:
-                cx = best_loc[0] + best_w // 2
-                cy = best_loc[1] + best_h // 2
-                return True, f"多尺度匹配达到 {best_pct}% (>= 阈值 {th_pct}%)", (cx, cy), float(best_val)
+            if best_val < threshold or best_res is None:
+                return False, f"最高相似度 {best_pct}% (阈值需达到 {th_pct}%)", None, float(max(0.0, best_val))
+
+            # 模板命中唯一性判断与多目标定位
+            locs = np.where(best_res >= threshold)
+            pts = list(zip(locs[1], locs[0]))
+            pts_with_sc = [(p[0], p[1], float(best_res[p[1], p[0]])) for p in pts]
+            pts_with_sc.sort(key=lambda item: -item[2])
+
+            distinct_matches = []
+            cluster_dist = max(12, min(best_w, best_h) // 2)
+            for x, y, sc in pts_with_sc:
+                if not any(abs(x - mx) < cluster_dist and abs(y - my) < cluster_dist for mx, my, _ in distinct_matches):
+                    distinct_matches.append((x, y, sc))
+
+            # 按照从上到下、从左到右排序
+            distinct_matches.sort(key=lambda m: (m[1] // cluster_dist, m[0]))
+
+            m_idx = int(match_index or 0)
+            if len(distinct_matches) == 1:
+                cx = distinct_matches[0][0] + best_w // 2
+                cy = distinct_matches[0][1] + best_h // 2
+                return True, f"唯一匹配达到 {best_pct}% (>= 阈值 {th_pct}%)", (cx, cy), float(best_val)
+            elif len(distinct_matches) > 1:
+                if m_idx > 0:
+                    if m_idx <= len(distinct_matches):
+                        pick = distinct_matches[m_idx - 1]
+                        cx = pick[0] + best_w // 2
+                        cy = pick[1] + best_h // 2
+                        return True, f"命中 {len(distinct_matches)} 个相同目标，已按配置选取第 {m_idx} 个 (得分: {round(pick[2]*100, 1)}%)", (cx, cy), float(pick[2])
+                    else:
+                        return False, f"⚠️ 配置选取第 {m_idx} 个，但同屏仅命中 {len(distinct_matches)} 个目标", None, float(best_val)
+                else:
+                    return False, f"⚠️ 模板命中不唯一！同屏检测到 {len(distinct_matches)} 个相同图标 (最高得分 {best_pct}%)，请配置【取第 N 个】或缩小 ROI！", None, float(best_val)
             else:
                 return False, f"最高相似度 {best_pct}% (阈值需达到 {th_pct}%)", None, float(max(0.0, best_val))
 
         except Exception as e:
             return False, f"模板匹配异常: {e}", None, 0.0
+
 
     def start_bot(self):
         if not self.rules:
@@ -1987,7 +2674,7 @@ class RealScreenScanBot:
                             if fallback_r and fallback_r.get("enabled", True):
                                 self.log(f"⏱️ 【限时未命中】等待步骤【{t_name}】超时！触发备用动作 -> 立即执行【{fallback_r['name']}】")
                                 region = getattr(self, "target_region", None)
-                                screenshot = ImageGrab.grab(bbox=region)
+                                screenshot = safe_grab(bbox=region)
                                 screen_np = np.array(screenshot)
                                 screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
                                 ret = self.detect_single_rule(fallback_r, screenshot, screen_gray, region=region)
@@ -2035,9 +2722,13 @@ class RealScreenScanBot:
                         active_rules = [r for r in self.rules if r.get("enabled", True)]
 
                 region = getattr(self, "target_region", None)
-                screenshot = ImageGrab.grab(bbox=region)
+                screenshot = safe_grab(bbox=region)
                 screen_np = np.array(screenshot)
                 screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
+
+                # 每轮状态机扫描仅对当前截图执行一次 4 变体 OCR，全局共享条目缓存
+                has_text_rule = any(r.get("type") == "text" for r in active_rules)
+                cached_ocr = self.run_shared_ocr(screenshot) if has_text_rule else None
 
                 matched_any = False
                 candidates = []
@@ -2050,7 +2741,7 @@ class RealScreenScanBot:
                     if r_cd > 0 and (now - self.rule_last_fire.get(r["id"], 0.0)) < r_cd:
                         continue
 
-                    ret = self.detect_single_rule(r, screenshot, screen_gray, region=region)
+                    ret = self.detect_single_rule(r, screenshot, screen_gray, region=region, cached_ocr=cached_ocr)
                     is_match, info, coord, score = ret[:4]
                     cand = ret[4] if len(ret) == 5 else None
 
@@ -2102,6 +2793,9 @@ class RealScreenScanBot:
                     self.log(f"🎯 触发步骤【{r['name']}】(P{winner['priority']})! {info} | 坐标: {final_coord}")
                     self.rule_last_fire[r["id"]] = time.time()
                     self.execute_smart_action(final_coord, r, candidate=cand)
+
+                    # 动作后加验证与重试 (点击后等目标消失或下一步出现，未达成则重试 1~2 次再判定失败)
+                    self.verify_action_result_and_retry(r, cand, final_coord, region, id_to_rule)
 
                     # 候选级「终止脚本」优先判断
                     if cand and cand.get("next_mode") == "stop":
@@ -2209,7 +2903,7 @@ class RealScreenScanBot:
         inp_up.mi.dwFlags = up_flag
         user32.SendInput(1, ctypes.byref(inp_up), ctypes.sizeof(INPUT))
 
-    def execute_smart_action(self, coord, rule, candidate=None):
+    def execute_smart_action(self, coord, rule, candidate=None, is_retry=False):
         action = (candidate.get("action") if candidate else None) or rule.get("action", "click")
         param = (candidate.get("action_param") if candidate else None) if (candidate and candidate.get("action_param")) else rule.get("action_param", "")
         humanize = rule.get("humanize", True)
@@ -2221,6 +2915,24 @@ class RealScreenScanBot:
             self.log(f"🛑 【安全熔断】目标坐标 ({ix}, {iy}) 位于本软件自身窗口内！已自动拦截，防止点到自己。")
             return
 
+        # 护栏1.5: 目标窗口白名单校验 (使用 WindowFromPoint 获取窗口标题/进程)
+        whitelist = (candidate.get("window_whitelist") if candidate else None) or rule.get("window_whitelist") or getattr(self, "global_whitelist_entry", None)
+        if isinstance(whitelist, tk.Entry):
+            whitelist = whitelist.get().strip()
+        else:
+            whitelist = str(whitelist or "").strip()
+
+        if coord and whitelist:
+            target_hwnd, win_title, proc_name = get_window_info_at(ix, iy)
+            allowed_tokens = [w.strip().lower() for w in re.split(r'[,;，；]', whitelist) if w.strip()]
+            if allowed_tokens:
+                title_lower = (win_title or "").lower()
+                proc_lower = (proc_name or "").lower()
+                matched_white = any(tok in title_lower or tok in proc_lower for tok in allowed_tokens)
+                if not matched_white:
+                    self.log(f"🛡️ 【目标窗口白名单拦截】目标坐标 ({ix}, {iy}) 所在窗口 [进程: {proc_name or '未知'}, 标题: '{win_title}'] 不在白名单【{whitelist}】中，已安全跳过并记录！")
+                    return
+
         if not coord and action in ("click", "double_click", "right_click"):
             self.log(f"⚠️ 【安全跳过】步骤【{rule.get('name')}】执行动作【{action}】需要坐标，但当前目标无坐标(coord=None)，跳过物理点击以防误触！")
             return
@@ -2231,12 +2943,18 @@ class RealScreenScanBot:
             return
 
         # 护栏3: 执行次数计数与上限熔断
-        self.action_counter += 1
-        if self.max_actions > 0 and self.action_counter >= self.max_actions:
-            self.log(f"🏁 【达到保护上限】已完成 {self.action_counter} 次操作，触发安全保护自动停机！")
-            self.stop_bot()
+        if not is_retry:
+            self.action_counter += 1
+            if self.max_actions > 0 and self.action_counter >= self.max_actions:
+                self.log(f"🏁 【达到保护上限】已完成 {self.action_counter} 次操作，触发安全保护自动停机！")
+                self.stop_bot()
 
         try:
+            # 复合动作序列支持 (一条规则支持'点击 -> 等待 0.3s -> 粘贴 -> 回车')
+            if action == "sequence" or "->" in str(param) or "→" in str(param):
+                self.parse_and_execute_composite_action(coord, param, rule, candidate=candidate)
+                return
+
             if action == "click" and coord:
                 self.hardware_click(ix, iy, button="left", humanize=humanize)
                 self.log(f"🖱️ 【四重穿透物理单击完成】: ({ix}, {iy})")
@@ -2256,12 +2974,12 @@ class RealScreenScanBot:
                 self.log(f"🖱️ 【已执行】鼠标平滑悬停: ({ix}, {iy})")
 
             elif action == "scroll_down":
-                amt = int(param) if param.isdigit() else 300
+                amt = int(param) if str(param).isdigit() else 300
                 pyautogui.scroll(-amt)
                 self.log(f"🖱️ 【已执行】向下滚动滚轮 {amt} 行")
 
             elif action == "scroll_up":
-                amt = int(param) if param.isdigit() else 300
+                amt = int(param) if str(param).isdigit() else 300
                 pyautogui.scroll(amt)
                 self.log(f"🖱️ 【已执行】向上滚动滚轮 {amt} 行")
 
@@ -2293,27 +3011,49 @@ class RealScreenScanBot:
                 self.log("🔊 【已触发】蜂鸣警报音！")
 
             elif action == "take_screenshot":
-                p = os.path.join(os.getcwd(), f"evidence_{int(time.time())}.png")
-                ImageGrab.grab().save(p)
+                p = os.path.join(BASE_DIR, f"evidence_{int(time.time())}.png")
+                safe_grab().save(p)
                 self.log(f"📷 【已存盘】截图证据: {os.path.basename(p)}")
 
         except Exception as e:
             self.log(f"❌ 动作执行异常: {e}")
 
+_single_instance_mutex = None
+
 if __name__ == "__main__":
-    # 单实例运行互斥保护 (避免双开互抢鼠标和覆盖 JSON)
-    _mutex = None
+    # 单实例运行互斥保护 (CreateMutex 防止开两个互相抢鼠标、覆盖 JSON)
     if sys.platform == "win32":
         try:
-            import ctypes
-            _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "ScreenScanRPA_SingleInstance_Mutex")
-            if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-                import tkinter.messagebox as mb
-                mb.showerror("重复运行", "⚠️ ScreenScan RPA 已有一个实例在运行中！\n请勿同时启动多个实例，以防按键和鼠标冲突。")
+            ERROR_ALREADY_EXISTS = 183
+            _single_instance_mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "ScreenScanRPA_SingleInstance_Mutex")
+            if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+                ctypes.windll.user32.MessageBoxW(
+                    0,
+                    "⚠️ ScreenScan RPA 已有一个实例在运行中！\n请勿同时启动多个实例，以防按键和鼠标冲突与配置覆盖。",
+                    "重复运行提示",
+                    0x10 | 0x0
+                )
                 sys.exit(0)
         except Exception:
             pass
 
     root = tk.Tk()
+
+    # 高 DPI 适配: 设置 tk scaling，解决 150% 缩放下界面字太小的问题
+    if sys.platform == "win32":
+        try:
+            user32 = ctypes.windll.user32
+            user32.SetProcessDPIAware()
+            hdc = user32.GetDC(0)
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX = 88
+            user32.ReleaseDC(0, hdc)
+            if dpi > 0:
+                root.tk.call('tk', 'scaling', dpi / 72.0)
+        except Exception:
+            try:
+                root.tk.call('tk', 'scaling', 1.3333)
+            except Exception:
+                pass
+
     app = RealScreenScanBot(root)
     root.mainloop()
