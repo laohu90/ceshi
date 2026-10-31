@@ -23,7 +23,7 @@ if errorlevel 1 (
 
 echo [2/2] Starting ScreenScan RPA Desktop GUI...
 echo ==========================================
-pythonw app.py >> screenscan_rpa.log 2>&1
+pythonw app.py >> crash.log 2>&1
 if errorlevel 1 (
     echo.
     echo [ERROR] Python app exited. See error above.

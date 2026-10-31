@@ -19,6 +19,7 @@ import threading
 import ctypes
 import json
 import subprocess
+import re
 
 # Windows 高 DPI 适配
 try:
@@ -121,6 +122,44 @@ def safe_grab(bbox=None):
         return ImageGrab.grab(bbox=bbox, all_screens=True)
     except Exception:
         return ImageGrab.grab(bbox=bbox)
+
+def set_clipboard_text(text):
+    """
+    跨线程安全剪贴板写入:
+    使用 Windows 原生 Win32 API (OpenClipboard / SetClipboardData)，
+    在引擎后台线程直接执行，绝不跨线程调用 Tkinter 避免界面假死冲突
+    """
+    if sys.platform == "win32":
+        try:
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            for _ in range(3):
+                if user32.OpenClipboard(0):
+                    break
+                time.sleep(0.05)
+            else:
+                return False
+            user32.EmptyClipboard()
+            text_bytes = (str(text) + '\0').encode('utf-16le')
+            GMEM_MOVEABLE = 0x0002
+            h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(text_bytes))
+            if h_mem:
+                ptr = kernel32.GlobalLock(h_mem)
+                ctypes.memmove(ptr, text_bytes, len(text_bytes))
+                kernel32.GlobalUnlock(h_mem)
+                CF_UNICODETEXT = 13
+                user32.SetClipboardData(CF_UNICODETEXT, h_mem)
+            user32.CloseClipboard()
+            return True
+        except Exception:
+            pass
+    try:
+        import pyperclip
+        pyperclip.copy(str(text))
+        return True
+    except Exception:
+        pass
+    return False
 
 def get_virtual_screen_geometry():
     """获取所有显示器组成的虚拟桌面总边界 (vx, vy, vw, vh)"""
@@ -2242,12 +2281,8 @@ class RealScreenScanBot:
                 if ":" in raw_step or "：" in raw_step:
                     content = re.split(r'[:：]', raw_step, 1)[1].strip()
                     if content:
-                        try:
-                            self.root.clipboard_clear()
-                            self.root.clipboard_append(content)
-                            self.root.update()
-                        except Exception:
-                            pass
+                        set_clipboard_text(content)
+                        time.sleep(0.05)
                 pyautogui.hotkey('ctrl', 'v')
             elif any(k in s for k in ("回车", "enter", "press_enter")):
                 pyautogui.press('enter')
@@ -2305,15 +2340,19 @@ class RealScreenScanBot:
             screen_np = np.array(screenshot)
             screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
 
+            # 复用 OCR 缓存：若当前步骤或下一步步骤涉及文字识别，本轮重试仅跑一次 4 变体 OCR 并共享
+            needs_ocr = (next_r and next_r.get("type") == "text") or (rule.get("type") == "text")
+            cached_ocr = self.run_shared_ocr(screenshot) if needs_ocr else None
+
             # 验证情况 1: 下一步目标已经出现
             if next_r:
-                ret_next = self.detect_single_rule(next_r, screenshot, screen_gray, region=region)
+                ret_next = self.detect_single_rule(next_r, screenshot, screen_gray, region=region, cached_ocr=cached_ocr)
                 if ret_next[0]:
                     self.log(f"✅ 【动作后验证成功】下一步【{next_r['name']}】已成功就绪！")
                     return True
 
             # 验证情况 2: 原目标已在屏幕上消失
-            ret_curr = self.detect_single_rule(rule, screenshot, screen_gray, region=region)
+            ret_curr = self.detect_single_rule(rule, screenshot, screen_gray, region=region, cached_ocr=cached_ocr)
             if not ret_curr[0]:
                 self.log(f"✅ 【动作后验证成功】步骤【{rule['name']}】原目标已成功消失响应！")
                 return True
@@ -2418,6 +2457,7 @@ class RealScreenScanBot:
             # 共享全局 OCR 缓存结果，彻底解决多条文字规则导致系统卡死变慢
             ocr_items = cached_ocr if cached_ocr is not None else self.run_shared_ocr(screenshot_pil)
 
+            # 第一阶段：单行直接比对 (包含数值与模糊匹配)
             for item in ocr_items:
                 txt = item["text"]
                 coord = item["coord"]
@@ -2438,6 +2478,24 @@ class RealScreenScanBot:
                             return True, f"智能OCR({var_name})识别 '{kw}' (文本: '{txt}')", coord, sc, None
                         else:
                             return True, f"智能OCR({var_name})识别到 '{kw}' (文本: '{txt}')，但无单词坐标(已置None阻止误点)", None, sc, None
+
+            # 第二阶段：跨行相邻合并检测 (解决如 "库存\n5" 或 "剩余\n10秒" 被 OCR 拆成上下两行无法匹配的问题)
+            n_items = len(ocr_items)
+            for i in range(n_items):
+                item_a = ocr_items[i]
+                for j in range(i + 1, min(i + 4, n_items)):
+                    item_b = ocr_items[j]
+                    # 仅在同一种预处理变体下合并相邻行
+                    if item_a.get("variant") != item_b.get("variant"):
+                        continue
+                    combined_txt = f"{item_a['text']} {item_b['text']}"
+                    for kw in kws:
+                        is_num, val, num_desc = evaluate_numeric_condition(kw, combined_txt)
+                        if is_num:
+                            # 坐标优先选取数字所在的行，次选标签行
+                            target_coord = item_b["coord"] or item_a["coord"]
+                            var_name = item_a.get("variant", "合并")
+                            return True, f"智能OCR({var_name})跨行合并数值命中: {num_desc} (【{item_a['text']}】+【{item_b['text']}】)", target_coord, 0.95, None
 
             sample = " | ".join(list(set(it["text"] for it in ocr_items))[:8]) if ocr_items else "无"
             return False, f"未匹配关键词/数值条件 {kws}。OCR识别到: [{sample}]", None, 0.0, None
@@ -2587,6 +2645,10 @@ class RealScreenScanBot:
         if self.running:
             return
 
+        # 在 UI 主线程中读取全局白名单配置，避免后台引擎线程跨线程访问 Tk 控件
+        if hasattr(self, 'global_whitelist_entry'):
+            self.global_whitelist = self.global_whitelist_entry.get().strip()
+
         self.running = True
         self.paused = False
         self.workflow_target_id = None
@@ -2677,7 +2739,8 @@ class RealScreenScanBot:
                                 screenshot = safe_grab(bbox=region)
                                 screen_np = np.array(screenshot)
                                 screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
-                                ret = self.detect_single_rule(fallback_r, screenshot, screen_gray, region=region)
+                                fb_ocr = self.run_shared_ocr(screenshot) if fallback_r.get("type") == "text" else None
+                                ret = self.detect_single_rule(fallback_r, screenshot, screen_gray, region=region, cached_ocr=fb_ocr)
                                 matched, info, coord, score = ret[:4]
                                 cand = ret[4] if len(ret) == 5 else None
                                 rx = region[0] if region else 0
@@ -2916,11 +2979,9 @@ class RealScreenScanBot:
             return
 
         # 护栏1.5: 目标窗口白名单校验 (使用 WindowFromPoint 获取窗口标题/进程)
-        whitelist = (candidate.get("window_whitelist") if candidate else None) or rule.get("window_whitelist") or getattr(self, "global_whitelist_entry", None)
-        if isinstance(whitelist, tk.Entry):
-            whitelist = whitelist.get().strip()
-        else:
-            whitelist = str(whitelist or "").strip()
+        # 读取 start_bot 缓存的白名单字符串，绝不跨线程访问 Tk 控件
+        whitelist = (candidate.get("window_whitelist") if candidate else None) or rule.get("window_whitelist") or getattr(self, "global_whitelist", "")
+        whitelist = str(whitelist or "").strip()
 
         if coord and whitelist:
             target_hwnd, win_title, proc_name = get_window_info_at(ix, iy)
