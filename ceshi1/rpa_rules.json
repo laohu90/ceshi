@@ -189,6 +189,8 @@
         "cooldown": 1.0,
         "lock_exclusive": 0.0
       }
-    ]
+    ],
+    "verify_after_action": false,
+    "match_index": 1
   }
 ]

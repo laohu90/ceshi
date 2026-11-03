@@ -90,16 +90,26 @@ def is_admin():
         return False
 
 def activate_target_window(x, y):
+    if sys.platform != "win32":
+        return None
     try:
         user32 = ctypes.windll.user32
         pt = POINT(int(x), int(y))
         hwnd = user32.WindowFromPoint(pt)
         if not hwnd:
             return None
-        root_hwnd = user32.GetAncestor(hwnd, 2)
+        root_hwnd = user32.GetAncestor(hwnd, 2)  # GA_ROOT = 2
         target = root_hwnd if root_hwnd else hwnd
-        user32.ShowWindow(target, 9)
-        
+
+        fg_hwnd = user32.GetForegroundWindow()
+        if fg_hwnd == target:
+            return hwnd
+
+        # 仅当目标窗口处于最小化状态时才还原(SW_RESTORE)，绝不破坏正常或已最大化窗口的布局尺寸！
+        if user32.IsIconic(target):
+            user32.ShowWindow(target, 9)
+            time.sleep(0.04)
+
         curr_tid = user32.GetCurrentThreadId()
         target_tid = user32.GetWindowThreadProcessId(target, None)
         if curr_tid != target_tid:
@@ -590,16 +600,18 @@ class ScreenSnipper:
     def __init__(self, parent, callback, return_bbox=False):
         self.callback = callback
         self.return_bbox = return_bbox
-        self.top = tk.Toplevel(parent)
-        self.top.attributes('-alpha', 0.3)
-        self.top.config(cursor="cross")
+        # 1. 在弹出半透明灰色蒙版之前，预先捕获纯净、原生的全屏底图，彻底杜绝蒙版灰度污染模板！
+        self.full_screenshot = safe_grab(bbox=None)
 
-        # 多显示器虚拟桌面全屏覆盖 (支持全部屏幕)
         vx, vy, vw, vh = get_virtual_screen_geometry()
         self.vx = vx
         self.vy = vy
         self.vw = vw
         self.vh = vh
+
+        self.top = tk.Toplevel(parent)
+        self.top.attributes('-alpha', 0.3)
+        self.top.config(cursor="cross")
         self.top.overrideredirect(True)
         self.top.geometry(f"{vw}x{vh}+{vx}+{vy}")
 
@@ -638,12 +650,22 @@ class ScreenSnipper:
             if self.return_bbox:
                 self.callback(bbox)
                 return
-            time.sleep(0.1)
-            img = safe_grab(bbox=bbox)
+            # 从未被半透明蒙版污染的纯净底图中精确裁切，保证模板原始像素 100% 清晰真实
+            try:
+                crop_x1 = max(0, min(self.full_screenshot.width - 1, gx1 - self.vx))
+                crop_y1 = max(0, min(self.full_screenshot.height - 1, gy1 - self.vy))
+                crop_x2 = max(0, min(self.full_screenshot.width, gx2 - self.vx))
+                crop_y2 = max(0, min(self.full_screenshot.height, gy2 - self.vy))
+                if (crop_x2 - crop_x1 > 5) and (crop_y2 - crop_y1 > 5):
+                    img = self.full_screenshot.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+                else:
+                    img = safe_grab(bbox=bbox)
+            except Exception:
+                time.sleep(0.12)
+                img = safe_grab(bbox=bbox)
             save_path = os.path.join(BASE_DIR, f"snip_{int(time.time())}.png")
             img.save(save_path)
             self.callback(save_path)
-
 
 class RuleDialog(tk.Toplevel):
     """智能防裁剪可滚动步骤编辑对话框：支持多图候选缩略图预览、独立优先级与专属跳转”"""
@@ -738,7 +760,7 @@ class RuleDialog(tk.Toplevel):
         self.humanize_var = tk.BooleanVar(value=self.rule.get("humanize", True))
         tk.Checkbutton(r1, text="拟人微操(±2px)", variable=self.humanize_var, bg="#0f172a", fg="#a78bfa", selectcolor="#1e293b", font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT, padx=(0, 10))
 
-        self.verify_action_var = tk.BooleanVar(value=self.rule.get("verify_after_action", True))
+        self.verify_action_var = tk.BooleanVar(value=self.rule.get("verify_after_action", False))
         tk.Checkbutton(r1, text="动作后验证(重试1-2次)", variable=self.verify_action_var, bg="#0f172a", fg="#38bdf8", selectcolor="#1e293b", font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT)
 
         r2 = tk.Frame(sec_base, bg="#0f172a")
@@ -1957,11 +1979,23 @@ class RealScreenScanBot:
         try:
             if not hasattr(self, "root") or not self.root:
                 return False
-            wx = self.root.winfo_rootx()
-            wy = self.root.winfo_rooty()
-            ww = self.root.winfo_width()
-            wh = self.root.winfo_height()
-            return (wx <= x <= wx + ww) and (wy <= y <= wy + wh)
+            # 优先通过真实 Win32 窗口句柄判定，绝对准确且不受 DPI 缩放影响
+            if sys.platform == "win32":
+                pt = POINT(int(x), int(y))
+                hwnd = ctypes.windll.user32.WindowFromPoint(pt)
+                if hwnd:
+                    my_hwnd = self.root.winfo_id()
+                    root_hwnd = ctypes.windll.user32.GetAncestor(hwnd, 2)
+                    if hwnd == my_hwnd or root_hwnd == my_hwnd:
+                        return True
+            if self.root.winfo_exists() and self.root.state() == "normal":
+                wx = self.root.winfo_rootx()
+                wy = self.root.winfo_rooty()
+                ww = self.root.winfo_width()
+                wh = self.root.winfo_height()
+                if ww > 20 and wh > 20 and (wx <= x <= wx + ww) and (wy <= y <= wy + wh):
+                    return True
+            return False
         except Exception:
             return False
 
@@ -1988,8 +2022,9 @@ class RealScreenScanBot:
             cand = ret[4] if len(ret) == 5 else None
             
             if matched and coord:
-                rx = region[0] if region else 0
-                ry = region[1] if region else 0
+                vx, vy, _, _ = get_virtual_screen_geometry()
+                rx = region[0] if region else vx
+                ry = region[1] if region else vy
                 ox = cand.get("offset_x", rule.get("offset_x", 0)) if cand else rule.get("offset_x", 0)
                 oy = cand.get("offset_y", rule.get("offset_y", 0)) if cand else rule.get("offset_y", 0)
                 tx, ty = coord[0] + rx + ox, coord[1] + ry + oy
@@ -2340,8 +2375,9 @@ class RealScreenScanBot:
                 if coord:
                     ox = cand.get("offset_x", rule.get("offset_x", 0)) if cand else rule.get("offset_x", 0)
                     oy = cand.get("offset_y", rule.get("offset_y", 0)) if cand else rule.get("offset_y", 0)
-                    rx = region[0] if region else 0
-                    ry = region[1] if region else 0
+                    vx, vy, _, _ = get_virtual_screen_geometry()
+                    rx = region[0] if region else vx
+                    ry = region[1] if region else vy
                     tx, ty = coord[0] + rx + ox, coord[1] + ry + oy
                     try:
                         pyautogui.moveTo(tx, ty, duration=0.25)
@@ -2655,11 +2691,10 @@ class RealScreenScanBot:
     def verify_action_result_and_retry(self, rule, candidate, coord, region, id_to_rule):
         """
         动作后加验证与重试:
-        点击后等目标消失或下一步出现，未达成则失败重试 1~2 次再判定失败
-        支持验证开关与局部区域轻量级检测，避免全屏文字扫描拖慢节奏
+        仅当步骤配置明确开启 'verify_after_action' 时才进行验证与重试。
+        默认不阻断普通循环点击，彻底解决常规按钮点击后不消失导致流程卡死的问题。
         """
-        # 开关检测：若步骤配置显式关闭验证，直接放行
-        if not rule.get("verify_after_action", True):
+        if not rule.get("verify_after_action", False):
             return True
 
         action = (candidate.get("action") if candidate else None) or rule.get("action", "click")
@@ -2675,36 +2710,10 @@ class RealScreenScanBot:
                 break
             time.sleep(0.30)
 
-            # 优化：针对 text 规则且无下一步指定跳转时，只对目标点击点周边微小区域 (200x80) 做快速检测
-            # 耗时从全屏的数秒骤降至 20ms 以内！
-            r_type = rule.get("type", "image")
-            if r_type == "text" and coord and not next_r:
-                cx, cy = coord
-                local_bbox = (max(0, cx - 100), max(0, cy - 40), cx + 100, cy + 40)
-                local_shot = safe_grab(bbox=local_bbox)
-                local_ocr = self.run_shared_ocr(local_shot)
-                kws = [k.strip() for k in rule.get("target", "").replace("|", ";").split(";") if k.strip()]
-                local_has_target = False
-                for item in local_ocr:
-                    for kw in kws:
-                        if evaluate_numeric_condition(kw, item["text"])[0] or fuzzy_match(kw, item["text"]):
-                            local_has_target = True
-                            break
-                    if local_has_target:
-                        break
-                if not local_has_target:
-                    self.log(f"✅ 【快速局部验证成功】步骤【{rule['name']}】原文字目标已在点击区域消失！")
-                    return True
-                else:
-                    self.log(f"🔄 【局部目标仍在】第 {attempt}/2 次重试物理点击...")
-                    self.execute_smart_action(coord, rule, candidate=candidate, is_retry=True)
-                    continue
-
-            # 常规全图验证流程
             screenshot = safe_grab(bbox=region)
             screen_np = np.array(screenshot)
             screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
-
+            r_type = rule.get("type", "image")
             needs_ocr = (next_r and next_r.get("type") == "text") or (r_type == "text")
             cached_ocr = self.run_shared_ocr(screenshot) if needs_ocr else None
 
@@ -2715,7 +2724,7 @@ class RealScreenScanBot:
                     self.log(f"✅ 【动作后验证成功】下一步【{next_r['name']}】已成功就绪！")
                     return True
 
-            # 验证情况 2: 原目标已在屏幕上消失
+            # 验证情况 2: 原目标已在屏幕上消失 (仅当显式设置了指定下一步时强制要求原目标消失)
             ret_curr = self.detect_single_rule(rule, screenshot, screen_gray, region=region, cached_ocr=cached_ocr)
             if not ret_curr[0]:
                 self.log(f"✅ 【动作后验证成功】步骤【{rule['name']}】原目标已成功消失响应！")
@@ -2724,7 +2733,10 @@ class RealScreenScanBot:
             self.log(f"🔄 【动作未响应重试 {attempt}/2】步骤【{rule['name']}】目标未消失且下一步未出现，正在重试点击...")
             self.execute_smart_action(coord, rule, candidate=candidate, is_retry=True)
 
-        self.log(f"⚠️ 【动作后验证判定】步骤【{rule['name']}】重试 2 次后目标仍未变化！")
+        self.log(f"⚠️ 【动作后验证提醒】步骤【{rule['name']}】重试 2 次后目标状态未发生变化。")
+        # 若未指定明确的跳转下一步(如常规循环)，放行通过，不阻断主流程循环
+        if not next_r:
+            return True
         return False
 
     def detect_single_rule(self, rule, screenshot_pil, screen_gray, region=None, cached_ocr=None):
@@ -2766,7 +2778,14 @@ class RealScreenScanBot:
                         })
 
                 if matched_cands:
-                    matched_cands.sort(key=lambda x: (x["priority"], -x["score"]))
+                    arb_mode = getattr(self, "arbitration_mode_var", None)
+                    arb_str = arb_mode.get().split()[0] if arb_mode else "confidence"
+                    if arb_str == "confidence":
+                        matched_cands.sort(key=lambda x: (-x["score"], x["priority"]))
+                    elif arb_str == "order":
+                        pass
+                    else:
+                        matched_cands.sort(key=lambda x: (x["priority"], -x["score"]))
                     win = matched_cands[0]
                     win_c = win["candidate"]
                     c_name = win_c.get("name") or os.path.basename(win_c.get("image_path", "候选图"))
@@ -2913,19 +2932,33 @@ class RealScreenScanBot:
             if cached and cached.get("mtime") == mtime:
                 t_gray = cached["gray"]
                 th_h, th_w = cached["size"]
+                t_mask = cached.get("mask")
             else:
                 with open(real_path, "rb") as f:
                     t_bytes = bytearray(f.read())
                 t_np = np.asarray(t_bytes, dtype=np.uint8)
-                t_cv = cv2.imdecode(t_np, cv2.IMREAD_COLOR)
+                # 使用 IMREAD_UNCHANGED 读取包括 Alpha 透明通道在内的完整通道
+                t_cv = cv2.imdecode(t_np, cv2.IMREAD_UNCHANGED)
                 if t_cv is None:
-                    return False, "图片文件解码失败", None, 0.0
+                    return False, f"图片解码失败: {os.path.basename(real_path)}", None, 0.0
 
-                t_gray = cv2.cvtColor(t_cv, cv2.COLOR_BGR2GRAY)
+                t_mask = None
+                if len(t_cv.shape) == 3 and t_cv.shape[2] == 4:
+                    # 包含 Alpha 通道：提取透明蒙版以排除背景干扰
+                    alpha = t_cv[:, :, 3]
+                    if np.any(alpha < 250):
+                        t_mask = (alpha > 50).astype(np.uint8) * 255
+                    t_gray = cv2.cvtColor(t_cv, cv2.COLOR_BGRA2GRAY)
+                elif len(t_cv.shape) == 3:
+                    t_gray = cv2.cvtColor(t_cv, cv2.COLOR_BGR2GRAY)
+                else:
+                    t_gray = t_cv
+
                 th_h, th_w = t_gray.shape
                 self.template_cache[real_path] = {
                     "img": t_cv,
                     "gray": t_gray,
+                    "mask": t_mask,
                     "size": (th_h, th_w),
                     "mtime": mtime
                 }
@@ -2939,17 +2972,27 @@ class RealScreenScanBot:
             best_w, best_h = th_w, th_h
             best_res = None
 
-            scales = [1.0, 0.92, 1.08, 0.85, 1.15]
+            # 支持全方位屏幕缩放尺度 (涵盖 100%, 125%, 150%, 175%, 200% 高清屏幕)
+            scales = [1.0, 1.25, 0.8, 1.5, 0.67, 1.12, 0.89, 1.33, 0.75]
             for scale in scales:
                 if scale == 1.0:
                     scaled_t = t_gray
+                    scaled_mask = t_mask
                 else:
                     nw, nh = int(th_w * scale), int(th_h * scale)
                     if nw >= scr_w or nh >= scr_h or nw < 5 or nh < 5:
                         continue
                     scaled_t = cv2.resize(t_gray, (nw, nh), interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC)
+                    scaled_mask = cv2.resize(t_mask, (nw, nh), interpolation=cv2.INTER_NEAREST) if t_mask is not None else None
 
-                res = cv2.matchTemplate(screen_gray, scaled_t, cv2.TM_CCOEFF_NORMED)
+                if scaled_mask is not None:
+                    try:
+                        res = cv2.matchTemplate(screen_gray, scaled_t, cv2.TM_CCOEFF_NORMED, mask=scaled_mask)
+                    except Exception:
+                        res = cv2.matchTemplate(screen_gray, scaled_t, cv2.TM_CCOEFF_NORMED)
+                else:
+                    res = cv2.matchTemplate(screen_gray, scaled_t, cv2.TM_CCOEFF_NORMED)
+
                 min_v, max_v, min_l, max_l = cv2.minMaxLoc(res)
                 if max_v > best_val:
                     best_val = max_v
@@ -2963,21 +3006,19 @@ class RealScreenScanBot:
             if best_val < threshold or best_res is None:
                 return False, f"最高相似度 {best_pct}% (阈值需达到 {th_pct}%)", None, float(max(0.0, best_val))
 
-            # 模板命中唯一性判断与多目标定位
-            locs = np.where(best_res >= threshold)
+            # 提取匹配点并按相似度严格降序排列
+            eval_thresh = max(threshold, best_val - 0.15)
+            locs = np.where(best_res >= eval_thresh)
             pts = list(zip(locs[1], locs[0]))
             pts_with_sc = [(p[0], p[1], float(best_res[p[1], p[0]])) for p in pts]
             pts_with_sc.sort(key=lambda item: -item[2])
 
-            distinct_matches = []
-            cluster_w = max(12, int(best_w * 0.6))
-            cluster_h = max(12, int(best_h * 0.6))
+            distinct_matches_by_score = []
+            cluster_w = max(10, int(best_w * 0.5))
+            cluster_h = max(10, int(best_h * 0.5))
             for x, y, sc in pts_with_sc:
-                if not any(abs(x - mx) < cluster_w and abs(y - my) < cluster_h for mx, my, _ in distinct_matches):
-                    distinct_matches.append((x, y, sc))
-
-            # 按照从上到下、从左到右自然顺序排序
-            distinct_matches.sort(key=lambda m: (m[1] // cluster_h, m[0]))
+                if not any(abs(x - mx) < cluster_w and abs(y - my) < cluster_h for mx, my, _ in distinct_matches_by_score):
+                    distinct_matches_by_score.append((x, y, sc))
 
             m_idx = 1
             if match_index is not None and str(match_index).strip() != "":
@@ -2986,26 +3027,31 @@ class RealScreenScanBot:
                 except Exception:
                     m_idx = 1
 
-            if len(distinct_matches) == 0:
-                return False, f"最高相似度 {best_pct}% (阈值需达到 {th_pct}%)", None, float(max(0.0, best_val))
-            elif len(distinct_matches) == 1:
-                cx = distinct_matches[0][0] + best_w // 2
-                cy = distinct_matches[0][1] + best_h // 2
+            if len(distinct_matches_by_score) == 0:
+                cx = best_loc[0] + best_w // 2
+                cy = best_loc[1] + best_h // 2
                 return True, f"匹配达到 {best_pct}% (>= 阈值 {th_pct}%)", (cx, cy), float(best_val)
+
+            # 默认取第1个: 确保永远取相似度最高点 (best_val)！
+            if m_idx <= 1:
+                pick = distinct_matches_by_score[0]
+                cx = pick[0] + best_w // 2
+                cy = pick[1] + best_h // 2
+                match_desc = f"匹配达到 {best_pct}% (>= 阈值 {th_pct}%)" if len(distinct_matches_by_score) == 1 else f"命中 {len(distinct_matches_by_score)} 处目标，优先锁定置信度最高点 (得分: {round(pick[2]*100, 1)}%)"
+                return True, match_desc, (cx, cy), float(pick[2])
             else:
-                if m_idx == 0:
-                    return False, f"⚠️ 模板命中不唯一！同屏检测到 {len(distinct_matches)} 个相同目标 (最高得分 {best_pct}%)，请在规则中配置【取第 N 个】或缩小 ROI！", None, float(best_val)
-                elif m_idx <= len(distinct_matches):
-                    pick = distinct_matches[m_idx - 1]
+                # 仅当显式配置了取第 2、3.. 个时，才按从上到下空间顺序选取
+                geo_sorted = sorted(distinct_matches_by_score, key=lambda m: (m[1] // cluster_h, m[0]))
+                if m_idx <= len(geo_sorted):
+                    pick = geo_sorted[m_idx - 1]
                     cx = pick[0] + best_w // 2
                     cy = pick[1] + best_h // 2
-                    return True, f"命中 {len(distinct_matches)} 处相同目标，已按配置选取第 {m_idx} 个 (得分: {round(pick[2]*100, 1)}%)", (cx, cy), float(pick[2])
+                    return True, f"命中 {len(geo_sorted)} 处目标，已按自然顺序选取第 {m_idx} 个 (得分: {round(pick[2]*100, 1)}%)", (cx, cy), float(pick[2])
                 else:
-                    return False, f"⚠️ 配置选取第 {m_idx} 个，但同屏仅检测到 {len(distinct_matches)} 处目标", None, float(best_val)
+                    return False, f"⚠️ 配置选取第 {m_idx} 个，但同屏仅检测到 {len(geo_sorted)} 处目标", None, float(best_val)
 
         except Exception as e:
             return False, f"模板匹配异常: {e}", None, 0.0
-
 
     def start_bot(self):
         if not self.rules:
@@ -3227,8 +3273,9 @@ class RealScreenScanBot:
                     cand = winner.get("candidate")
                     ox = cand.get("offset_x", r.get("offset_x", 0)) if cand else r.get("offset_x", 0)
                     oy = cand.get("offset_y", r.get("offset_y", 0)) if cand else r.get("offset_y", 0)
-                    rx = region[0] if region else 0
-                    ry = region[1] if region else 0
+                    vx, vy, _, _ = get_virtual_screen_geometry()
+                    rx = region[0] if region else vx
+                    ry = region[1] if region else vy
                     final_coord = (coord[0] + rx + ox, coord[1] + ry + oy) if coord else None
 
                     self.log(f"🎯 触发步骤【{r['name']}】(P{winner['priority']})! {info} | 坐标: {final_coord}")
@@ -3314,38 +3361,57 @@ class RealScreenScanBot:
                 self.log(f"状态机巡检异常: {e}")
                 time.sleep(interval)
 
-    def hardware_click(self, x, y, button="left", hold_time=0.15, humanize=True):
+    def hardware_click(self, x, y, button="left", hold_time=0.06, humanize=True):
         ix, iy = int(x), int(y)
         if humanize:
-            ix += random.randint(-2, 2)
-            iy += random.randint(-2, 2)
-            hold_time = random.uniform(0.12, 0.18)
+            ix += random.randint(-1, 1)
+            iy += random.randint(-1, 1)
+            hold_time = random.uniform(0.04, 0.08)
+        else:
+            hold_time = max(0.02, hold_time)
 
         user32 = ctypes.windll.user32
+        # 1. 光标精准定位与窗口激活 (不破坏最大化尺寸)
         user32.SetCursorPos(ix, iy)
         try:
-            pyautogui.moveTo(ix, iy, duration=0.06)
+            pyautogui.moveTo(ix, iy, duration=0.04)
         except Exception:
             pass
-        time.sleep(0.04)
 
         hwnd = activate_target_window(ix, iy)
-        time.sleep(0.04)
+        time.sleep(0.02)
+        user32.SetCursorPos(ix, iy)
 
         down_flag = MOUSEEVENTF_LEFTDOWN if button == "left" else MOUSEEVENTF_RIGHTDOWN
         up_flag = MOUSEEVENTF_LEFTUP if button == "left" else MOUSEEVENTF_RIGHTUP
-        
-        inp_down = INPUT()
-        inp_down.type = INPUT_MOUSE
-        inp_down.mi.dwFlags = down_flag
-        user32.SendInput(1, ctypes.byref(inp_down), ctypes.sizeof(INPUT))
-        
-        time.sleep(hold_time)
 
-        inp_up = INPUT()
-        inp_up.type = INPUT_MOUSE
-        inp_up.mi.dwFlags = up_flag
-        user32.SendInput(1, ctypes.byref(inp_up), ctypes.sizeof(INPUT))
+        # 2. 第一重穿透: Win32 SendInput 物理事件队列
+        try:
+            inp_down = INPUT()
+            inp_down.type = INPUT_MOUSE
+            inp_down.mi.dwFlags = down_flag
+            user32.SendInput(1, ctypes.byref(inp_down), ctypes.sizeof(INPUT))
+            time.sleep(hold_time)
+            inp_up = INPUT()
+            inp_up.type = INPUT_MOUSE
+            inp_up.mi.dwFlags = up_flag
+            user32.SendInput(1, ctypes.byref(inp_up), ctypes.sizeof(INPUT))
+        except Exception:
+            pass
+
+        # 3. 第二重穿透: Win32 mouse_event 底层硬件驱动指令 (游戏与部分全屏程序最兼容)
+        try:
+            user32.mouse_event(down_flag, 0, 0, 0, 0)
+            time.sleep(hold_time)
+            user32.mouse_event(up_flag, 0, 0, 0, 0)
+        except Exception:
+            pass
+
+        # 4. 第三重穿透: PyAutoGUI 标准点击安全兜底
+        try:
+            pyautogui.click(ix, iy, button=button)
+        except Exception:
+            pass
 
     def execute_smart_action(self, coord, rule, candidate=None, is_retry=False):
         action = (candidate.get("action") if candidate else None) or rule.get("action", "click")
@@ -3381,8 +3447,6 @@ class RealScreenScanBot:
 
         if not coord and action == "sequence" and any(k in str(param).lower() for k in ("点击", "click", "双击", "右键")):
             self.log(f"⚠️ 【安全跳过】步骤【{rule.get('name')}】复合序列包含鼠标点击动作，但当前目标无坐标(coord=None)，跳过整链执行以防误触！")
-            return
-            self.log(f"⚠️ 【安全跳过】步骤【{rule.get('name')}】执行动作【{action}】需要物理坐标，但当前目标无坐标(coord=None)，跳过执行以防误触焦点窗口！")
             return
 
         # 护栏2: Dry-Run 仿真演练拦截
@@ -3475,6 +3539,20 @@ class RealScreenScanBot:
 _single_instance_mutex = None
 
 if __name__ == "__main__":
+    # 高 DPI 适配: 优先在创建 GUI 窗口前初始化 Per-Monitor V2 DPI 识别，彻底对齐物理与逻辑像素！
+    if sys.platform == "win32":
+        try:
+            # Per-Monitor V2 DPI awareness (Windows 10 1703+)
+            ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        except Exception:
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            except Exception:
+                try:
+                    ctypes.windll.user32.SetProcessDPIAware()
+                except Exception:
+                    pass
+
     # 单实例运行互斥保护 (CreateMutex 防止开两个互相抢鼠标、覆盖 JSON)
     if sys.platform == "win32":
         try:
@@ -3493,11 +3571,9 @@ if __name__ == "__main__":
 
     root = tk.Tk()
 
-    # 高 DPI 适配: 设置 tk scaling，解决 150% 缩放下界面字太小的问题
     if sys.platform == "win32":
         try:
             user32 = ctypes.windll.user32
-            user32.SetProcessDPIAware()
             hdc = user32.GetDC(0)
             dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX = 88
             user32.ReleaseDC(0, hdc)
