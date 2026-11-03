@@ -19,6 +19,7 @@ import threading
 import ctypes
 import json
 import subprocess
+import copy
 import re
 
 # Windows 高 DPI 适配
@@ -682,7 +683,7 @@ class RuleDialog(tk.Toplevel):
         self.configure(bg="#0f172a")
 
         self.all_rules = all_rules or []
-        self.rule = rule if rule else {
+        self.rule = copy.deepcopy(rule) if rule else {
             "id": f"r_{int(time.time()*1000)}",
             "name": f"智能步骤-{len(self.all_rules)+1}",
             "priority": 1,
@@ -705,8 +706,24 @@ class RuleDialog(tk.Toplevel):
             "window_whitelist": "",
             "candidates": []
         }
-        self.candidates = list(self.rule.get("candidates") or [])
-        self.img_tk_cache = [] # 缓存 ImageTk.PhotoImage 避免 GC 垃圾回收导致图片消失
+        self.candidates = copy.deepcopy(self.rule.get("candidates") or [])
+        # 若现有步骤中 candidates 尚为空，但 target 中含有分号分隔的图片路径，自动补齐为候选卡片
+        if not self.candidates and self.rule.get("target") and self.rule.get("type", "image") == "image":
+            raw_t = str(self.rule["target"]).replace("|", ";")
+            paths = [p.strip() for p in raw_t.split(";") if p.strip()]
+            for p_idx, p in enumerate(paths):
+                self.candidates.append({
+                    "id": f"cand_{int(time.time()*1000)}_{p_idx+1}",
+                    "name": os.path.basename(p),
+                    "image_path": p,
+                    "priority": 1 if p_idx == 0 else min(99, p_idx + 1),
+                    "action": self.rule.get("action", "click"),
+                    "action_param": self.rule.get("action_param", ""),
+                    "next_mode": self.rule.get("next_mode", "loop"),
+                    "next_target_id": self.rule.get("next_target_id", "")
+                })
+        self.img_tk_cache = [] # 缓存 ImageTk.PhotoImage 避免 GC
+        self.cand_rows = []    # 缓存活动候选卡片控件映射，实现无损采集与毫秒级双向联动
         self.on_save = on_save
         self.create_widgets()
 
@@ -845,6 +862,7 @@ class RuleDialog(tk.Toplevel):
         tk.Label(cand_top_bar, text="💡 每张图片均独立识别与排序，优先级最高者优先执行：", bg="#0f172a", fg="#cbd5e1", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
         tk.Button(cand_top_bar, text="➕ 添加候选图片", command=self.add_candidate, bg="#8b5cf6", fg="white", font=("Microsoft YaHei UI", 8, "bold"), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.RIGHT, padx=2)
         tk.Button(cand_top_bar, text="📁 选择多张文件", command=self.browse_multiple_candidates, bg="#3b82f6", fg="white", font=("Microsoft YaHei UI", 8, "bold"), relief=tk.FLAT, padx=8, pady=2).pack(side=tk.RIGHT, padx=2)
+        tk.Button(cand_top_bar, text="🔢 按优先级重排", command=self.sort_candidates_by_prio, bg="#475569", fg="white", font=("Microsoft YaHei UI", 8, "bold"), relief=tk.FLAT, padx=6, pady=2).pack(side=tk.RIGHT, padx=2)
 
         self.cands_container = tk.Frame(self.sec_cands, bg="#0f172a")
         self.cands_container.pack(fill=tk.X)
@@ -1053,10 +1071,72 @@ class RuleDialog(tk.Toplevel):
         self.on_flow_mode_change()
         self.render_candidates_ui()
 
+    def update_badge_appearance(self, badge_lbl, prio_val):
+        """精准徽章样式联动：根据实际优先级数字动态着色与展示 (数字1最高)"""
+        try:
+            p = int(prio_val)
+        except Exception:
+            p = 2
+        if p == 1:
+            badge_lbl.config(text="🥇 P1(最高)", bg="#ef4444", fg="#ffffff")
+        elif p == 2:
+            badge_lbl.config(text="🥈 P2(次高)", bg="#f59e0b", fg="#000000")
+        elif p == 3:
+            badge_lbl.config(text="🥉 P3", bg="#3b82f6", fg="#ffffff")
+        else:
+            badge_lbl.config(text=f"P{p}", bg="#475569", fg="#ffffff")
+
+    def harvest_candidates_from_ui(self):
+        """无损保存采集器：在保存或重排前，从界面控件 100% 提取最新优先级、动作、参数与路径，杜绝失焦未保存或回退问题"""
+        for row in self.cand_rows:
+            idx = row.get("idx")
+            if idx is None or idx < 0 or idx >= len(self.candidates):
+                continue
+            cand = self.candidates[idx]
+
+            # 1. 采集优先级数字
+            sp = row.get("prio_sp")
+            if sp:
+                try:
+                    val_str = sp.get().strip()
+                    if val_str:
+                        cand["priority"] = max(1, min(99, int(val_str)))
+                except Exception:
+                    pass
+
+            # 2. 采集图片路径与名称
+            pe = row.get("path_entry")
+            if pe:
+                p_text = pe.get().strip()
+                cand["image_path"] = p_text
+                if p_text and (not cand.get("name") or cand["name"].startswith("候选图")):
+                    cand["name"] = os.path.basename(p_text)
+
+            # 3. 采集命中动作
+            act_w = row.get("act_sp")
+            if act_w:
+                raw_act = act_w.get().split(" ")[0]
+                cand["action"] = raw_act
+
+            # 4. 采集动作专属参数 (单键名/文本/快捷键)
+            param_w = row.get("param_entry")
+            if param_w:
+                cand["action_param"] = param_w.get().strip()
+
+            # 5. 采集命中跳转目标与模式
+            jump_w = row.get("jump_combo")
+            jmap = row.get("jump_id_map", {})
+            if jump_w:
+                lbl = jump_w.get()
+                t_id, mode = jmap.get(lbl, ("", "loop"))
+                cand["next_mode"] = mode
+                cand["next_target_id"] = t_id
+
     def render_candidates_ui(self):
         for w in self.cands_container.winfo_children():
             w.destroy()
         self.img_tk_cache.clear()
+        self.cand_rows = []
 
         # 同步更新主输入框中的路径列表
         target_paths = [c.get("image_path", "").strip() for c in self.candidates if c.get("image_path", "").strip()]
@@ -1065,12 +1145,9 @@ class RuleDialog(tk.Toplevel):
             self.target_entry.insert(0, ";".join(target_paths))
 
         if not self.candidates:
-            no_lbl = tk.Label(self.cands_container, text="暂无候选图片。点击上方“📁 选择多张文件”或“➕ 添加图片”添加本地图片文件。", bg="#0f172a", fg="#64748b", font=("Microsoft YaHei UI", 8), pady=12)
+            no_lbl = tk.Label(self.cands_container, text="暂无候选图片。点击上方“📁 选择多张文件”或“➕ 添加候选图片”添加本地图片文件。", bg="#0f172a", fg="#64748b", font=("Microsoft YaHei UI", 8), pady=12)
             no_lbl.pack()
             return
-
-        # 按照优先级数字从小到大排序显示 (数字1为最高优先级)
-        sorted_cands = sorted(enumerate(self.candidates), key=lambda x: int(x[1].get("priority", 1)))
 
         # 构建跳转目标下拉选项列表
         jump_options = ["(自由全功能循环)", "⏹️ 终止脚本"]
@@ -1081,7 +1158,30 @@ class RuleDialog(tk.Toplevel):
                 jump_options.append(lbl)
                 jump_id_map[lbl] = (r["id"], "jump")
 
-        for rank, (orig_idx, cand) in enumerate(sorted_cands):
+        cand_act_vals = [
+            "click (物理单击)",
+            "hotkey (快捷键)",
+            "press_key (按单键)",
+            "type_text (输入文本)",
+            "press_enter (回车)",
+            "double_click (双击)",
+            "right_click (右键)",
+            "hover (悬停)",
+            "sound_alarm (警报)"
+        ]
+        act_map = {
+            "click": "click (物理单击)",
+            "hotkey": "hotkey (快捷键)",
+            "press_key": "press_key (按单键)",
+            "type_text": "type_text (输入文本)",
+            "press_enter": "press_enter (回车)",
+            "double_click": "double_click (双击)",
+            "right_click": "right_click (右键)",
+            "hover": "hover (悬停)",
+            "sound_alarm": "sound_alarm (警报)"
+        }
+
+        for i, cand in enumerate(self.candidates):
             card = tk.Frame(self.cands_container, bg="#1e293b", highlightbackground="#334155", highlightthickness=1, padx=8, pady=6)
             card.pack(fill=tk.X, pady=4)
 
@@ -1116,58 +1216,93 @@ class RuleDialog(tk.Toplevel):
             row_top = tk.Frame(mid, bg="#1e293b")
             row_top.pack(fill=tk.X, pady=1)
 
-            prio_val = int(cand.get("priority", 1))
-            p_badge = f"🥇 P1(最高)" if rank == 0 else (f"🥈 P2" if rank == 1 else f"P{prio_val}")
-            tk.Label(row_top, text=p_badge, bg="#f59e0b", fg="#000", font=("Microsoft YaHei UI", 8, "bold"), padx=4).pack(side=tk.LEFT, padx=(0, 6))
+            prio_val = int(cand.get("priority", 2))
+            badge_lbl = tk.Label(row_top, text="🥈 P2", bg="#f59e0b", fg="#000", font=("Microsoft YaHei UI", 8, "bold"), padx=4)
+            badge_lbl.pack(side=tk.LEFT, padx=(0, 6))
+            self.update_badge_appearance(badge_lbl, prio_val)
 
             tk.Label(row_top, text="图片路径/名称:", bg="#1e293b", fg="#cbd5e1", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
             path_entry = tk.Entry(row_top, width=22, bg="#0f172a", fg="#fff", insertbackground="white", font=("Microsoft YaHei UI", 8))
             path_entry.insert(0, p_raw)
             path_entry.pack(side=tk.LEFT, padx=(2, 6), fill=tk.X, expand=True)
-            path_entry.bind("<FocusOut>", lambda e, idx=orig_idx, entry=path_entry: self.update_cand_path(idx, entry.get()))
+            path_entry.bind("<FocusOut>", lambda e, idx=i, entry=path_entry: self.update_cand_path(idx, entry.get()))
 
-            tk.Button(row_top, text="📁 浏览", command=lambda idx=orig_idx: self.browse_single_cand_image(idx), bg="#3b82f6", fg="white", relief=tk.FLAT, font=("Microsoft YaHei UI", 8), padx=4).pack(side=tk.LEFT, padx=(0, 6))
+            tk.Button(row_top, text="📁 浏览", command=lambda idx=i: self.browse_single_cand_image(idx), bg="#3b82f6", fg="white", relief=tk.FLAT, font=("Microsoft YaHei UI", 8), padx=4).pack(side=tk.LEFT, padx=(0, 6))
 
             tk.Label(row_top, text="优先级(1最高):", bg="#1e293b", fg="#f59e0b", font=("Microsoft YaHei UI", 8, "bold")).pack(side=tk.LEFT)
             prio_sp = tk.Spinbox(row_top, from_=1, to=99, width=3, bg="#0f172a", fg="#f59e0b", font=("Microsoft YaHei UI", 8, "bold"))
             prio_sp.delete(0, tk.END)
             prio_sp.insert(0, str(prio_val))
             prio_sp.pack(side=tk.LEFT, padx=(2, 6))
-            prio_sp.bind("<FocusOut>", lambda e, idx=orig_idx, sp=prio_sp: self.update_cand_prio(idx, sp.get()))
 
-            # 行2：独立动作 + 独立命中跳转到指定步骤 (解决用户需求：每个图片各自独立跳转)
+            # 优先级双向无损联动处理函数：
+            def on_prio_change_live(idx=i, sp=prio_sp, blbl=badge_lbl):
+                try:
+                    val_str = sp.get().strip()
+                    if not val_str:
+                        return
+                    new_p = max(1, min(99, int(val_str)))
+                except Exception:
+                    return
+                if 0 <= idx < len(self.candidates):
+                    self.candidates[idx]["priority"] = new_p
+                    self.update_badge_appearance(blbl, new_p)
+
+            # 箭头点击命令联动 + 键盘敲击即时联动 + 失焦联动
+            prio_sp.config(command=on_prio_change_live)
+            prio_sp.bind("<KeyRelease>", lambda e, f=on_prio_change_live: f())
+            prio_sp.bind("<FocusOut>", lambda e, f=on_prio_change_live: f())
+            prio_sp.bind("<Return>", lambda e, f=on_prio_change_live: f())
+
+            # 行2：独立动作 + 动作专属参数 + 命中后跳转到指定步骤
             row_bottom = tk.Frame(mid, bg="#1e293b")
             row_bottom.pack(fill=tk.X, pady=(2, 1))
 
             tk.Label(row_bottom, text="🎯 命中动作:", bg="#1e293b", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
             c_act = cand.get("action", self.rule.get("action", "click"))
-            act_map = {
-                "click": "click (物理单击)",
-                "hotkey": "hotkey (快捷键)",
-                "press_key": "press_key (按单键)",
-                "type_text": "type_text (输入文本)",
-                "press_enter": "press_enter (回车)",
-                "double_click": "double_click (双击)",
-                "right_click": "right_click (右键)",
-                "hover": "hover (悬停)",
-                "sound_alarm": "sound_alarm (警报)"
-            }
-            cand_act_vals = [
-                "click (物理单击)",
-                "hotkey (快捷键)",
-                "press_key (按单键)",
-                "type_text (输入文本)",
-                "press_enter (回车)",
-                "double_click (双击)",
-                "right_click (右键)",
-                "hover (悬停)",
-                "sound_alarm (警报)"
-            ]
             act_sp = ttk.Combobox(row_bottom, values=cand_act_vals, state="readonly", width=14, font=("Microsoft YaHei UI", 8))
             act_sp.set(act_map.get(c_act, "click (物理单击)"))
-            act_sp.pack(side=tk.LEFT, padx=(2, 8))
-            act_sp.bind("<<ComboboxSelected>>", lambda e, idx=orig_idx, combo=act_sp: self.update_cand_action(idx, combo.get()))
+            act_sp.pack(side=tk.LEFT, padx=(2, 6))
 
+            # 专属参数输入栏 (支持键盘单键、快捷键、文本输入)
+            tk.Label(row_bottom, text="参数/按键:", bg="#1e293b", fg="#cbd5e1", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
+            param_entry = tk.Entry(row_bottom, width=14, bg="#0f172a", fg="#38bdf8", insertbackground="white", font=("Microsoft YaHei UI", 8))
+            param_entry.insert(0, cand.get("action_param", ""))
+            param_entry.pack(side=tk.LEFT, padx=(2, 4))
+
+            quick_frame = tk.Frame(row_bottom, bg="#1e293b")
+            quick_frame.pack(side=tk.LEFT, padx=(0, 6))
+
+            def setup_presets_for_action(raw_action, pe=param_entry, qf=quick_frame):
+                for w in qf.winfo_children():
+                    w.destroy()
+                if raw_action == "press_key":
+                    pe.config(bg="#0f172a", fg="#38bdf8")
+                    for k in ["enter", "esc", "tab", "space"]:
+                        tk.Button(qf, text=k, command=lambda key=k, e=pe: (e.delete(0, tk.END), e.insert(0, key)), bg="#334155", fg="#93c5fd", font=("Microsoft YaHei UI", 7), relief=tk.FLAT, padx=2).pack(side=tk.LEFT, padx=1)
+                elif raw_action == "hotkey":
+                    pe.config(bg="#0f172a", fg="#f59e0b")
+                    for k in ["ctrl+c", "ctrl+v", "alt+f4"]:
+                        tk.Button(qf, text=k, command=lambda key=k, e=pe: (e.delete(0, tk.END), e.insert(0, key)), bg="#334155", fg="#fcd34d", font=("Microsoft YaHei UI", 7), relief=tk.FLAT, padx=2).pack(side=tk.LEFT, padx=1)
+                elif raw_action == "type_text":
+                    pe.config(bg="#0f172a", fg="#34d399")
+                elif raw_action == "sequence":
+                    pe.config(bg="#0f172a", fg="#c084fc")
+                    tk.Button(qf, text="+等待0.5s", command=lambda e=pe: e.insert(tk.END, " -> wait:0.5"), bg="#334155", fg="#d8b4fe", font=("Microsoft YaHei UI", 7), relief=tk.FLAT, padx=2).pack(side=tk.LEFT, padx=1)
+                else:
+                    pe.config(bg="#1e293b", fg="#64748b")
+
+            setup_presets_for_action(c_act)
+
+            def on_action_change_event(e, idx=i, combo=act_sp, pe=param_entry, qf=quick_frame):
+                raw = combo.get().split(" ")[0]
+                if 0 <= idx < len(self.candidates):
+                    self.candidates[idx]["action"] = raw
+                setup_presets_for_action(raw, pe, qf)
+
+            act_sp.bind("<<ComboboxSelected>>", on_action_change_event)
+
+            # 跳转目标 Combobox
             tk.Label(row_bottom, text="🔀 命中后跳转到:", bg="#1e293b", fg="#a855f7", font=("Microsoft YaHei UI", 8, "bold")).pack(side=tk.LEFT)
             c_jump_id = cand.get("next_target_id", "")
             c_jump_mode = cand.get("next_mode", "loop")
@@ -1181,18 +1316,30 @@ class RuleDialog(tk.Toplevel):
                         curr_jump_lbl = label
                         break
 
-            jump_combo = ttk.Combobox(row_bottom, values=jump_options, state="readonly", width=20, font=("Microsoft YaHei UI", 8))
+            jump_combo = ttk.Combobox(row_bottom, values=jump_options, state="readonly", width=18, font=("Microsoft YaHei UI", 8))
             jump_combo.set(curr_jump_lbl)
             jump_combo.pack(side=tk.LEFT, padx=(2, 4))
-            jump_combo.bind("<<ComboboxSelected>>", lambda e, idx=orig_idx, combo=jump_combo, jmap=jump_id_map: self.update_cand_jump(idx, combo.get(), jmap))
+            jump_combo.bind("<<ComboboxSelected>>", lambda e, idx=i, combo=jump_combo, jmap=jump_id_map: self.update_cand_jump(idx, combo.get(), jmap))
 
-            # 排序微调与删除按钮
+            # 注册当前卡片的所有控件到 cand_rows
+            self.cand_rows.append({
+                "idx": i,
+                "prio_sp": prio_sp,
+                "badge_lbl": badge_lbl,
+                "path_entry": path_entry,
+                "act_sp": act_sp,
+                "param_entry": param_entry,
+                "jump_combo": jump_combo,
+                "jump_id_map": jump_id_map
+            })
+
+            # 排序卡片按钮 (上移/下移位置，并支持删除)
             btn_box = tk.Frame(card, bg="#1e293b")
             btn_box.pack(side=tk.RIGHT, padx=(4, 0))
-            
-            tk.Button(btn_box, text="⬆️", command=lambda idx=orig_idx: self.adjust_cand_prio(idx, 1), bg="#334155", fg="#fff", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=4).pack(side=tk.LEFT, padx=1)
-            tk.Button(btn_box, text="⬇️", command=lambda idx=orig_idx: self.adjust_cand_prio(idx, -1), bg="#334155", fg="#fff", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=4).pack(side=tk.LEFT, padx=1)
-            tk.Button(btn_box, text="🗑️", command=lambda idx=orig_idx: self.delete_candidate(idx), bg="#ef4444", fg="#fff", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=4).pack(side=tk.LEFT, padx=(4, 0))
+
+            tk.Button(btn_box, text="⬆️", command=lambda idx=i: self.move_cand_up(idx), bg="#334155", fg="#fff", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=4).pack(side=tk.LEFT, padx=1)
+            tk.Button(btn_box, text="⬇️", command=lambda idx=i: self.move_cand_down(idx), bg="#334155", fg="#fff", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=4).pack(side=tk.LEFT, padx=1)
+            tk.Button(btn_box, text="🗑️", command=lambda idx=i: self.delete_candidate(idx), bg="#ef4444", fg="#fff", font=("Microsoft YaHei UI", 8), relief=tk.FLAT, padx=4).pack(side=tk.LEFT, padx=(4, 0))
 
     def update_cand_action(self, idx, val):
         if 0 <= idx < len(self.candidates):
@@ -1209,58 +1356,73 @@ class RuleDialog(tk.Toplevel):
     def update_cand_path(self, idx, val):
         if 0 <= idx < len(self.candidates):
             self.candidates[idx]["image_path"] = val.strip()
+            if not self.candidates[idx].get("name") or self.candidates[idx]["name"].startswith("候选图"):
+                self.candidates[idx]["name"] = os.path.basename(val.strip()) if val.strip() else "候选图"
+
+    def move_cand_up(self, idx):
+        self.harvest_candidates_from_ui()
+        if idx > 0 and idx < len(self.candidates):
+            self.candidates[idx], self.candidates[idx - 1] = self.candidates[idx - 1], self.candidates[idx]
             self.render_candidates_ui()
 
-    def update_cand_prio(self, idx, val):
-        if 0 <= idx < len(self.candidates):
-            try:
-                self.candidates[idx]["priority"] = max(1, min(99, int(val)))
-            except ValueError:
-                pass
+    def move_cand_down(self, idx):
+        self.harvest_candidates_from_ui()
+        if 0 <= idx < len(self.candidates) - 1:
+            self.candidates[idx], self.candidates[idx + 1] = self.candidates[idx + 1], self.candidates[idx]
             self.render_candidates_ui()
 
-    def adjust_cand_prio(self, idx, delta):
-        # delta > 0 表示提升优先级（数值变小，例如 2 -> 1）
-        if 0 <= idx < len(self.candidates):
-            curr = int(self.candidates[idx].get("priority", 1))
-            self.candidates[idx]["priority"] = max(1, min(99, curr - delta))
-            self.render_candidates_ui()
+    def sort_candidates_by_prio(self):
+        self.harvest_candidates_from_ui()
+        self.candidates.sort(key=lambda x: int(x.get("priority", 1)))
+        self.render_candidates_ui()
 
     def delete_candidate(self, idx):
+        self.harvest_candidates_from_ui()
         if 0 <= idx < len(self.candidates):
             del self.candidates[idx]
             self.render_candidates_ui()
 
     def add_candidate(self):
+        self.harvest_candidates_from_ui()
         new_idx = len(self.candidates) + 1
-        new_prio = 2  # 添加后默认均是第二优先级 (P2)
+        init_prio = 1 if len(self.candidates) == 0 else min(99, len(self.candidates) + 1)
         self.candidates.append({
             "id": f"cand_{int(time.time()*1000)}_{new_idx}",
             "name": f"候选图-{new_idx}",
             "image_path": "",
-            "priority": new_prio,
-            "action": "click"
+            "priority": init_prio,
+            "action": "click",
+            "action_param": "",
+            "next_mode": "loop",
+            "next_target_id": ""
         })
         self.render_candidates_ui()
 
     def browse_single_cand_image(self, idx):
         path = filedialog.askopenfilename(title="选择图片文件", filetypes=[("图片", "*.png *.jpg *.jpeg *.bmp")])
         if path and 0 <= idx < len(self.candidates):
+            self.harvest_candidates_from_ui()
             self.candidates[idx]["image_path"] = path
+            self.candidates[idx]["name"] = os.path.basename(path)
             self.render_candidates_ui()
 
     def browse_multiple_candidates(self):
         paths = filedialog.askopenfilenames(title="批量选择多张候选图片", filetypes=[("图片", "*.png *.jpg *.jpeg *.bmp")])
         if paths:
-            for p in paths:
-                new_idx = len(self.candidates) + 1
-                new_prio = 2  # 添加后默认均是第二优先级 (P2)
+            self.harvest_candidates_from_ui()
+            existing_count = len(self.candidates)
+            for p_idx, p in enumerate(paths):
+                new_idx = existing_count + p_idx + 1
+                init_prio = 1 if (existing_count == 0 and p_idx == 0) else min(99, existing_count + p_idx + 1)
                 self.candidates.append({
                     "id": f"cand_{int(time.time()*1000)}_{new_idx}",
                     "name": os.path.basename(p),
                     "image_path": p,
-                    "priority": new_prio,
-                    "action": "click"
+                    "priority": init_prio,
+                    "action": "click",
+                    "action_param": "",
+                    "next_mode": "loop",
+                    "next_target_id": ""
                 })
             self.render_candidates_ui()
 
@@ -1426,15 +1588,20 @@ class RuleDialog(tk.Toplevel):
     def browse_image(self):
         paths = filedialog.askopenfilenames(title="选择多张候选图片", filetypes=[("图片", "*.png *.jpg *.jpeg *.bmp")])
         if paths:
-            for p in paths:
-                new_idx = len(self.candidates) + 1
-                new_prio = min(99, new_idx + 1)
+            self.harvest_candidates_from_ui()
+            existing_count = len(self.candidates)
+            for p_idx, p in enumerate(paths):
+                new_idx = existing_count + p_idx + 1
+                init_prio = 1 if (existing_count == 0 and p_idx == 0) else min(99, existing_count + p_idx + 1)
                 self.candidates.append({
                     "id": f"cand_{int(time.time()*1000)}_{new_idx}",
                     "name": os.path.basename(p),
                     "image_path": p,
-                    "priority": new_prio,
-                    "action": "click"
+                    "priority": init_prio,
+                    "action": "click",
+                    "action_param": "",
+                    "next_mode": "loop",
+                    "next_target_id": ""
                 })
             self.render_candidates_ui()
 
@@ -1445,18 +1612,24 @@ class RuleDialog(tk.Toplevel):
 
     def on_snip_done(self, path):
         self.deiconify()
+        self.harvest_candidates_from_ui()
         new_idx = len(self.candidates) + 1
-        new_prio = 2  # 添加后默认均是第二优先级 (P2)
+        init_prio = 1 if len(self.candidates) == 0 else min(99, len(self.candidates) + 1)
         self.candidates.append({
             "id": f"cand_{int(time.time()*1000)}_{new_idx}",
             "name": f"截图_{os.path.basename(path)}",
             "image_path": path,
-            "priority": new_prio,
-            "action": "click"
+            "priority": init_prio,
+            "action": "click",
+            "action_param": "",
+            "next_mode": "loop",
+            "next_target_id": ""
         })
         self.render_candidates_ui()
 
     def save(self):
+        # 1. 保存前无损采集所有活动候选卡片控件中的数据
+        self.harvest_candidates_from_ui()
         name = self.name_entry.get().strip() or "未命名步骤"
         t_raw = self.type_var.get().split(" ")[0]
         act_raw = self.action_var.get().split(" ")[0]
@@ -2095,7 +2268,7 @@ class RealScreenScanBot:
         r_id = sel[0]
         rule = next((r for r in self.rules if r["id"] == r_id), None)
         if rule:
-            RuleDialog(self.root, rule=dict(rule), all_rules=self.rules, on_save=self.on_rule_saved)
+            RuleDialog(self.root, rule=copy.deepcopy(rule), all_rules=self.rules, on_save=self.on_rule_saved)
 
     def delete_rule(self):
         sel = self.tree.selection()
